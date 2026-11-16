@@ -10,12 +10,10 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlsplit
 
-from scripts.trust import lexers
-from scripts.trust.lexers import LexError, RawComment
+from trust_checks import lexers
+from trust_checks.lexers import LexError, RawComment
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 TS_HELPER = Path(__file__).resolve().with_name("ts_comments.mjs")
-TS_LIB = REPO_ROOT / "frontend/node_modules/typescript/lib/typescript.js"
 
 LANGUAGES = {
     ".py": "python",
@@ -32,30 +30,6 @@ LANGUAGES = {
     ".yaml": "yaml",
     ".toml": "toml",
 }
-
-EXCLUDED = (
-    "backend/src/services/trading/gates/rules/**",
-    "backend/src/services/trading/gates/a_eval_*.py",
-    "backend/src/services/trading/gates/a_base.py",
-    "backend/src/services/trading/gates/e_breakdown.py",
-    "backend/src/services/trading/gates/k_series.py",
-    "backend/src/agents/todo*.py",
-    "backend/TEST/**",
-    "backend/ipynb/**",
-    "backend/docker/**",
-    "backend/tests/fixtures/aox-417/safe-rules/**",
-    ".claude/skills/**",
-    ".claude/agents/**",
-    ".omp/ecc-payload/**",
-    "**/node_modules/**",
-    "**/.venv/**",
-    "**/target/**",
-    "**/dist/**",
-    "**/*.lock",
-    "**/*.lockb",
-    "**/*-lock.json",
-    "**/*-lock.yaml",
-)
 
 EXTERNAL = "external"
 LICENSE = "license"
@@ -159,13 +133,13 @@ def language_of(path: str) -> str | None:
     return LANGUAGES.get(pure.suffix)
 
 
-def is_excluded(path: str) -> bool:
+def is_excluded(path: str, patterns: Sequence[str]) -> bool:
     pure = PurePosixPath(path)
-    return any(pure.full_match(pattern) for pattern in EXCLUDED)
+    return any(pure.full_match(pattern) for pattern in patterns)
 
 
-def is_target(path: str) -> bool:
-    return language_of(path) is not None and not is_excluded(path)
+def is_target(path: str, patterns: Sequence[str] = ()) -> bool:
+    return language_of(path) is not None and not is_excluded(path, patterns)
 
 
 def classify_text(text: str) -> str:
@@ -280,15 +254,22 @@ def _ts_raws(entries: Sequence[dict]) -> list[RawComment]:
     return raws
 
 
-def _run_ts(items: Sequence[tuple[str, str]]) -> list[dict]:
+def _run_ts(items: Sequence[tuple[str, str]], ts_lib: Path | None) -> list[dict]:
+    if ts_lib is None:
+        raise ToolMissing(
+            "TS/JS 대상 파일이 있는데 trust.toml [trust] node_modules 가 없다 — "
+            "typescript 가 설치된 node_modules 경로(뿌리 기준)를 적고 bun install --frozen-lockfile 을 먼저 한다"
+        )
     bun = shutil.which("bun")
     if bun is None:
-        raise ToolMissing("bun 이 없다 — bun 을 설치하고 cd frontend && bun install --frozen-lockfile 을 먼저 한다")
-    if not TS_LIB.is_file():
-        raise ToolMissing(f"{TS_LIB} 가 없다 — cd frontend && bun install --frozen-lockfile 을 먼저 한다")
+        raise ToolMissing("bun 이 없다 — bun 을 설치하고 TS 의존을 bun install --frozen-lockfile 로 먼저 설치한다")
+    if not ts_lib.is_file():
+        raise ToolMissing(
+            f"{ts_lib} 가 없다 — trust.toml [trust] node_modules 가 가리키는 폴더에서 bun install --frozen-lockfile 을 먼저 한다"
+        )
     payload = json.dumps([{"name": name, "text": text} for name, text in items])
     result = subprocess.run(
-        [bun, str(TS_HELPER), str(TS_LIB)],
+        [bun, str(TS_HELPER), str(ts_lib)],
         input=payload,
         capture_output=True,
         text=True,
@@ -309,7 +290,7 @@ _LEXERS = {
 }
 
 
-def scan_texts(items: Sequence[tuple[str, str]]) -> list[FileScan]:
+def scan_texts(items: Sequence[tuple[str, str]], ts_lib: Path | None = None) -> list[FileScan]:
     results: list[FileScan | None] = [None] * len(items)
     ts_items: list[tuple[int, str, str]] = []
     for index, (path, text) in enumerate(items):
@@ -324,7 +305,7 @@ def scan_texts(items: Sequence[tuple[str, str]]) -> list[FileScan]:
             except LexError as error:
                 results[index] = FileScan(path, error=error)
     if ts_items:
-        outputs = _run_ts([(path, text) for _, path, text in ts_items])
+        outputs = _run_ts([(path, text) for _, path, text in ts_items], ts_lib)
         for (index, path, _), output in zip(ts_items, outputs, strict=True):
             if output["error"]:
                 results[index] = FileScan(path, error=LexError(1, f"TS 판정 실패: {output['error']}"))
@@ -333,5 +314,5 @@ def scan_texts(items: Sequence[tuple[str, str]]) -> list[FileScan]:
     return [result if result is not None else FileScan(path) for result, (path, _) in zip(results, items, strict=True)]
 
 
-def scan_text(path: str, text: str) -> FileScan:
-    return scan_texts([(path, text)])[0]
+def scan_text(path: str, text: str, ts_lib: Path | None = None) -> FileScan:
+    return scan_texts([(path, text)], ts_lib)[0]

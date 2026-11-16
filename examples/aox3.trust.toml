@@ -1,0 +1,67 @@
+[trust]
+baseline = "backend/scripts/trust_baseline.json"
+node_modules = "frontend/node_modules"
+
+[comments]
+exclude = [
+    "backend/src/services/trading/gates/rules/**",
+    "backend/src/services/trading/gates/a_eval_*.py",
+    "backend/src/services/trading/gates/a_base.py",
+    "backend/src/services/trading/gates/e_breakdown.py",
+    "backend/src/services/trading/gates/k_series.py",
+    "backend/src/agents/todo*.py",
+    "backend/TEST/**",
+    "backend/ipynb/**",
+    "backend/docker/**",
+    "backend/tests/fixtures/aox-417/safe-rules/**",
+    ".claude/skills/**",
+    ".claude/agents/**",
+    ".omp/ecc-payload/**",
+    "**/node_modules/**",
+    "**/.venv/**",
+    "**/target/**",
+    "**/dist/**",
+    "**/*.lock",
+    "**/*.lockb",
+    "**/*-lock.json",
+    "**/*-lock.yaml",
+]
+
+[repo]
+forbid_names = ["CLAUDE.md"]
+tool_settings_dirs = ["backend"]
+
+[metrics.import_linter]
+key = "services_to_routes_imports"
+pyproject = "backend/pyproject.toml"
+contract = "src.services 는 src.routes 를 부르지 않는다 — 함께 쓰는 계산·스키마는 src/services 아래로 옮긴다"
+
+[metrics.banned_api]
+key = "direct_db_clients"
+pyproject = "backend/pyproject.toml"
+code = "TID251"
+allow = ["core/database.py", "tests/**"]
+
+[metrics.eslint]
+key = "frontend_api_exceptions"
+dir = "frontend"
+exceptions = "frontend/eslint-exceptions.json"
+contract = "frontend/eslint-contract.json"
+
+[metrics.ts_any]
+roots = ["frontend/src"]
+
+[metrics.ty]
+pyproject = "backend/pyproject.toml"
+baseline = "backend/ty-baseline.json"
+
+[metrics.knip]
+dir = "frontend"
+
+[metrics.ci_quarantine]
+tests = "backend/tests"
+marker = "ci_quarantine"
+
+[metrics.prose_only_rules]
+doc = "docs/standards.md"
+heading = "규칙과 강제 수단"

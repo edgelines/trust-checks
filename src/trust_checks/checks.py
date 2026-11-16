@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
-from scripts.trust import gitfiles
-from scripts.trust.gitfiles import Change
-from scripts.trust.scan import (
+from trust_checks import gitfiles
+from trust_checks.config import Config, join, under
+from trust_checks.gitfiles import Change
+from trust_checks.scan import (
     BAD_DATE,
     MISSING,
     Comment,
@@ -65,7 +66,7 @@ def _limit(now: date) -> date:
 def disallowed_message() -> str:
     return (
         "허용 안 된 주석 — 지우고, 꼭 남길 내용이면 함수·변수 이름이나 시험으로 옮기거나 "
-        "docs/engineering-notes.md 에 적는다. 바깥 제약이면 '외부: ', 이슈면 이슈 주소로 시작한다"
+        "저장소 문서에 적는다. 바깥 제약이면 '외부: ', 이슈면 이슈 주소로 시작한다"
     )
 
 
@@ -190,9 +191,11 @@ def _decode(path: str, data: bytes | None) -> tuple[str | None, Problem | None]:
         return None, Problem(path, 1, "UTF-8 로 읽지 못했다 — 파일을 UTF-8 로 저장한다")
 
 
-def judge_candidates(candidates: Sequence[Candidate], now: date, is_approved: bool) -> list[Problem]:
-    current = scan_texts([(item.path, item.text or "") for item in candidates])
-    base = scan_texts([(item.path, item.base_text) for item in candidates if item.base_text is not None])
+def judge_candidates(
+    candidates: Sequence[Candidate], now: date, is_approved: bool, ts_lib: Path | None = None
+) -> list[Problem]:
+    current = scan_texts([(item.path, item.text or "") for item in candidates], ts_lib)
+    base = scan_texts([(item.path, item.base_text) for item in candidates if item.base_text is not None], ts_lib)
     base_iter = iter(base)
     problems: list[Problem] = []
     for item, scan in zip(candidates, current, strict=True):
@@ -205,12 +208,12 @@ Reader = Callable[[str], bytes | None]
 
 
 def _collect(
-    root: Path, changes: Sequence[Change], read_current: Reader, base_ref: str | None
+    root: Path, changes: Sequence[Change], read_current: Reader, base_ref: str | None, exclude: Sequence[str]
 ) -> tuple[list[Candidate], list[Problem]]:
     candidates: list[Candidate] = []
     problems: list[Problem] = []
     for change in changes:
-        if not is_target(change.path):
+        if not is_target(change.path, exclude):
             continue
         data = read_current(change.path)
         if data is None:
@@ -243,35 +246,37 @@ def _read_index(root: Path) -> Reader:
     return read
 
 
-def check_comments_since(root: Path, ref: str, now: date, is_approved: bool) -> tuple[int, list[Problem]]:
+def check_comments_since(
+    root: Path, config: Config, ref: str, now: date, is_approved: bool
+) -> tuple[int, list[Problem]]:
     base, changes = gitfiles.changes_since(root, ref)
-    candidates, problems = _collect(root, changes, _read_worktree(root), base)
-    problems.extend(judge_candidates(candidates, now, is_approved))
+    candidates, problems = _collect(root, changes, _read_worktree(root), base, config.exclude)
+    problems.extend(judge_candidates(candidates, now, is_approved, config.ts_lib(root)))
     return len(candidates), problems
 
 
-def check_comments_staged(root: Path, now: date, is_approved: bool) -> tuple[int, list[Problem]]:
+def check_comments_staged(root: Path, config: Config, now: date, is_approved: bool) -> tuple[int, list[Problem]]:
     base, changes = gitfiles.staged_changes(root)
-    candidates, problems = _collect(root, changes, _read_index(root), base)
-    problems.extend(judge_candidates(candidates, now, is_approved))
+    candidates, problems = _collect(root, changes, _read_index(root), base, config.exclude)
+    problems.extend(judge_candidates(candidates, now, is_approved, config.ts_lib(root)))
     return len(candidates), problems
 
 
-def tracked_targets(root: Path) -> list[str]:
-    return [path for path in gitfiles.tracked_files(root) if is_target(path)]
+def tracked_targets(root: Path, exclude: Sequence[str] = ()) -> list[str]:
+    return [path for path in gitfiles.tracked_files(root) if is_target(path, exclude)]
 
 
-def scan_repo(root: Path) -> tuple[list[FileScan], list[Problem]]:
+def scan_repo(root: Path, config: Config) -> tuple[list[FileScan], list[Problem]]:
     items: list[tuple[str, str]] = []
     problems: list[Problem] = []
     read = _read_worktree(root)
-    for path in tracked_targets(root):
+    for path in tracked_targets(root, config.exclude):
         text, problem = _decode(path, read(path))
         if problem is not None:
             problems.append(problem)
         elif text is not None:
             items.append((path, text))
-    return scan_texts(items), problems
+    return scan_texts(items, config.ts_lib(root)), problems
 
 
 class CheckError(Exception):
@@ -281,8 +286,8 @@ class CheckError(Exception):
         self.details = list(details)
 
 
-def find_expired(root: Path, now: date) -> list[Problem]:
-    scans, unreadable = scan_repo(root)
+def find_expired(root: Path, config: Config, now: date) -> list[Problem]:
+    scans, unreadable = scan_repo(root, config)
     unreadable = list(unreadable)
     problems: list[Problem] = []
     for scan in scans:
@@ -304,17 +309,16 @@ def find_expired(root: Path, now: date) -> list[Problem]:
     return sorted(problems, key=lambda problem: (problem.path, problem.line))
 
 
-BACKEND_TOOL_CONFIGS = frozenset(
+TOOL_CONFIG_NAMES = frozenset(
     {"ruff.toml", ".ruff.toml", "ty.toml", ".importlinter", "setup.cfg", "tox.ini", ".flake8"}
 )
-BACKEND_PYPROJECT = "backend/pyproject.toml"
 IGNORE_FILE_NAMES = frozenset({".ignore", ".rgignore"})
 TOOL_TABLES = ("ruff", "ty", "importlinter")
 
 
-def _tool_config_message() -> str:
+def _tool_config_message(main: str) -> str:
     return (
-        "검사 도구 설정 파일이 따로 있다 — 지운다. ruff·ty·import-linter 설정은 backend/pyproject.toml 한 곳에 둔다"
+        f"검사 도구 설정 파일이 따로 있다 — 지운다. ruff·ty·import-linter 설정은 {main} 한 곳에 둔다"
         "(다른 설정 파일이 있으면 도구가 pyproject 설정을 무시한다)"
     )
 
@@ -331,13 +335,34 @@ def _nested_tool_tables(root: Path, path: str) -> bool:
     return isinstance(tool, dict) and any(name in tool for name in TOOL_TABLES)
 
 
-def check_repo(root: Path) -> list[Problem]:
+def _tool_settings_problem(root: Path, path: str, directories: Sequence[str]) -> Problem | None:
+    pure = PurePosixPath(path)
+    for directory in directories:
+        if not under(path, directory):
+            continue
+        main = join(directory, "pyproject.toml")
+        if pure.name in TOOL_CONFIG_NAMES:
+            return Problem(path, 1, _tool_config_message(main))
+        if pure.name == "pyproject.toml" and path != main and _nested_tool_tables(root, path):
+            return Problem(path, 1, _tool_config_message(main))
+        return None
+    return None
+
+
+def check_repo(root: Path, config: Config) -> list[Problem]:
     problems: list[Problem] = []
+    forbidden = set(config.forbid_names)
+    directories = sorted(config.tool_settings_dirs, key=lambda item: (-len(PurePosixPath(item or ".").parts), item))
     for path in gitfiles.tracked_files(root):
         pure = PurePosixPath(path)
-        if pure.name == "CLAUDE.md":
+        if pure.name in forbidden:
             problems.append(
-                Problem(path, 1, "추적 파일 CLAUDE.md 가 있다 — 지우고 내용은 같은 폴더의 AGENTS.md 로 옮긴다")
+                Problem(
+                    path,
+                    1,
+                    f"추적 파일 {pure.name} 가 있다 — 지운다. 남길 내용은 다른 이름의 파일로 옮긴다"
+                    f"({config.label} [repo] forbid_names 가 막는 이름)",
+                )
             )
         if any(".disabled" in part for part in pure.parts):
             problems.append(
@@ -345,7 +370,7 @@ def check_repo(root: Path) -> list[Problem]:
                     path,
                     1,
                     "이름에 .disabled 가 든 추적 파일이 있다 — 끈 파일을 남기지 말고 지우거나 고쳐서 다시 켠다. "
-                    "시험을 잠시 빼야 하면 ci_quarantine 표시를 쓴다",
+                    "시험을 잠시 빼야 하면 격리 표시(예 pytest 마커)를 쓴다",
                 )
             )
         if pure.name in IGNORE_FILE_NAMES:
@@ -354,15 +379,21 @@ def check_repo(root: Path) -> list[Problem]:
                     path,
                     1,
                     "검사 도구가 따르는 무시 목록 파일이 있다 — 지운다. 여기 적힌 파일은 ruff·ty 같은 검사 도구가 건너뛴다. "
-                    "검사에서 뺄 파일은 backend/pyproject.toml 의 exclude 로만 정한다",
+                    "검사에서 뺄 파일은 각 도구 설정의 exclude 로만 정한다",
                 )
             )
-        if pure.parts[:1] != ("backend",):
-            continue
-        if pure.name in BACKEND_TOOL_CONFIGS:
-            problems.append(Problem(path, 1, _tool_config_message()))
-        elif pure.name == "pyproject.toml" and path != BACKEND_PYPROJECT and _nested_tool_tables(root, path):
-            problems.append(Problem(path, 1, _tool_config_message()))
+        problem = _tool_settings_problem(root, path, directories)
+        if problem is not None:
+            problems.append(problem)
+        if config.node_modules is not None and under(path, config.node_modules):
+            problems.append(
+                Problem(
+                    path,
+                    1,
+                    f"[trust] node_modules({config.node_modules}) 아래 파일을 추적한다 — 설치 폴더는 추적하지 않는다. "
+                    "git rm --cached 로 빼고 무시 목록에 넣는다",
+                )
+            )
     problems.extend(
         Problem(path, 1, "추적 파일을 무시 목록에 넣으면 검사 도구가 건너뛴다 — 무시 목록에서 뺀다(.gitignore 등)")
         for path in gitfiles.ignored_tracked_files(root)

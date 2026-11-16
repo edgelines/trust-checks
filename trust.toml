@@ -1,0 +1,7 @@
+[trust]
+baseline = "trust-baseline.json"
+node_modules = "node_modules"
+
+[repo]
+forbid_names = ["CLAUDE.md"]
+tool_settings_dirs = ["."]
