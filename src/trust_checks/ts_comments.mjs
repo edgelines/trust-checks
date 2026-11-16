@@ -17,6 +17,7 @@ const JSX_TEXT = new Set([ts.SyntaxKind.JsxText, ts.SyntaxKind.JsxTextAllWhiteSp
 
 function scriptKind(name) {
   if (name.endsWith(".tsx")) return ts.ScriptKind.TSX;
+  if (name.endsWith(".jsx")) return ts.ScriptKind.JSX;
   if (name.endsWith(".ts") || name.endsWith(".mts") || name.endsWith(".cts")) return ts.ScriptKind.TS;
   return ts.ScriptKind.JS;
 }
