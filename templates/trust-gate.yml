@@ -32,10 +32,10 @@ jobs:
         run: __INSTALL_TS_DEPENDENCIES__
       - name: Check changed file comments
         if: ${{ !cancelled() }}
-        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks comments --base "$BASE_SHA"
+        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks comments --base "$BASE_SHA"
       - name: Check trust metrics
         if: ${{ !cancelled() }}
-        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks metrics --check --base "$BASE_SHA"
+        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks metrics --check --base "$BASE_SHA"
       - name: Check repository rules
         if: ${{ !cancelled() }}
-        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks repo
+        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks repo

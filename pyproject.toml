@@ -1,6 +1,6 @@
 [project]
 name = "trust-checks"
-version = "0.1.0"
+version = "0.1.2"
 description = "주석 금지·검사 끄기 표시·기준 숫자·저장소 검사 공용 도구"
 readme = "README.md"
 requires-python = ">=3.13"
