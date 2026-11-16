@@ -1,8 +1,8 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 
-const [toolDir, projectDir] = process.argv.slice(2);
-const require = createRequire(path.join(toolDir, "package.json"));
+const [projectDir] = process.argv.slice(2);
+const require = createRequire(path.join(projectDir, "package.json"));
 const { ESLint } = require("eslint");
 
 const { files, rules, probes = [] } = JSON.parse(await Bun.stdin.text());

@@ -1,0 +1,41 @@
+name: Trust Gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  trust-gate:
+    runs-on: __RUNNER_LABELS__
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      TRUST_BASELINE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-approved') && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.14'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install TS dependencies
+        run: __INSTALL_TS_DEPENDENCIES__
+      - name: Check changed file comments
+        if: ${{ !cancelled() }}
+        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks comments --base "$BASE_SHA"
+      - name: Check trust metrics
+        if: ${{ !cancelled() }}
+        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks metrics --check --base "$BASE_SHA"
+      - name: Check repository rules
+        if: ${{ !cancelled() }}
+        run: uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks repo

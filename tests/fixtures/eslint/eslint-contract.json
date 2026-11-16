@@ -1,0 +1,75 @@
+{
+  "files": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "src/**/*.js",
+    "src/**/*.jsx"
+  ],
+  "reference": "src/index.tsx",
+  "exempt": {
+    "@typescript-eslint/no-restricted-imports": [
+      "src/utils/auth.ts",
+      "src/utils/requestAuth.ts",
+      "src/**/__tests__/**",
+      "src/**/*.test.*"
+    ]
+  },
+  "probe": {
+    "path": "src/__trust_probe__/Probe.tsx",
+    "lines": [
+      "import axios from 'axios';",
+      "import { use, useActionState, useOptimistic } from 'react';",
+      "import { useFormStatus, preload, preinit, preconnect, prefetchDNS } from 'react-dom';",
+      "import * as ReactAll from 'react';",
+      "export const names = [axios, use, useActionState, useOptimistic, useFormStatus, preload, preinit, preconnect, prefetchDNS];",
+      "export const socket = new WebSocket('ws://probe');",
+      "export const socketType = window.WebSocket;",
+      "export const pending = Promise.withResolvers();",
+      "export const viaNamespace = ReactAll.useOptimistic;"
+    ]
+  },
+  "expect": [
+    {
+      "label": "axios",
+      "rule": "@typescript-eslint/no-restricted-imports",
+      "line": 1,
+      "count": 1
+    },
+    {
+      "label": "react 의 use·useActionState·useOptimistic",
+      "rule": "app/no-react19-api",
+      "line": 2,
+      "count": 3
+    },
+    {
+      "label": "react-dom 의 useFormStatus·preload·preinit·preconnect·prefetchDNS",
+      "rule": "app/no-react19-api",
+      "line": 3,
+      "count": 5
+    },
+    {
+      "label": "new WebSocket",
+      "rule": "no-restricted-syntax",
+      "line": 6,
+      "count": 1
+    },
+    {
+      "label": "window.WebSocket",
+      "rule": "no-restricted-syntax",
+      "line": 7,
+      "count": 1
+    },
+    {
+      "label": "Promise.withResolvers",
+      "rule": "no-restricted-properties",
+      "line": 8,
+      "count": 1
+    },
+    {
+      "label": "react 의 useOptimistic(네임스페이스)",
+      "rule": "app/no-react19-api",
+      "line": 9,
+      "count": 1
+    }
+  ]
+}

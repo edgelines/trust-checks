@@ -1,0 +1,6 @@
+{
+  "@typescript-eslint/no-restricted-imports": [],
+  "app/no-react19-api": [],
+  "no-restricted-properties": [],
+  "no-restricted-syntax": []
+}

@@ -6,75 +6,45 @@ import re
 import shutil
 import subprocess
 import tomllib
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from scripts.trust import gitfiles, settings
-from scripts.trust.checks import LABEL, Problem
-from scripts.trust.scan import (
-    DISALLOWED,
-    EXTERNAL,
-    ISSUE,
-    LICENSE,
-    REPO_ROOT,
-    FileScan,
-    is_target,
-    scan_texts,
+from trust_checks import config as config_module
+from trust_checks import gitfiles, settings
+from trust_checks.checks import LABEL, Problem
+from trust_checks.config import (
+    COMMENT_KEYS,
+    CONFIG_NAME,
+    BannedApi,
+    Config,
+    ConfigError,
+    Eslint,
+    ImportLinter,
+    Knip,
+    ProseOnly,
+    Quarantine,
+    TsAny,
+    Ty,
+    join,
+    under,
 )
-from scripts.trust.settings import FRONTEND_API_RULES, eslint_level_problems
+from trust_checks.scan import DISALLOWED, EXTERNAL, ISSUE, LICENSE, FileScan, is_target, scan_texts
+from trust_checks.settings import ContractError, EslintContract
 
-BASELINE_PATH = "backend/scripts/trust_baseline.json"
-TY_BASELINE_PATH = "backend/ty-baseline.json"
-PYPROJECT_PATH = "backend/pyproject.toml"
-ESLINT_EXCEPTIONS_PATH = "frontend/eslint-exceptions.json"
-STANDARDS_PATH = "docs/standards.md"
-FRONTEND_SRC = "frontend/src/"
-BACKEND_TESTS = "backend/tests/"
-KNIP_PATH = "frontend/node_modules/.bin/knip"
-ESLINT_CONFIG_PATH = "frontend/eslint.config.mjs"
 ESLINT_HELPER = Path(__file__).resolve().with_name("eslint_rules.mjs")
-TOOL_FRONTEND = REPO_ROOT / "frontend"
-ESLINT_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx"})
-QUARANTINE = "ci_quarantine"
-
-KEYS = (
-    "services_to_routes_imports",
-    "direct_db_clients",
-    "frontend_api_exceptions",
-    "ts_any",
-    "suppressions",
-    "allowed_comments_external",
-    "allowed_comments_license",
-    "allowed_comments_issue",
-    "disallowed_comments",
-    "ty_baseline_entries",
-    "knip_unused",
-    "ci_quarantine",
-    "prose_only_rules",
-)
-COMMENT_KEYS = (
-    "suppressions",
-    "allowed_comments_external",
-    "allowed_comments_license",
-    "allowed_comments_issue",
-    "disallowed_comments",
-)
+TS_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"})
+STATUSES = frozenset({"강제됨", "판단(사람)", "문서뿐"})
+PROSE_ONLY = "문서뿐"
+TABLE_HEADER = ["규칙", "출처", "강제 수단", "상태"]
+REVERT_SUBJECT_RE = re.compile(r"^(?:Revert\b|revert(?:\(|:))")
+_TS_ANY_RE = re.compile(r":\s*any\b|\bas\s+any\b|<any>")
 _CATEGORY_KEYS = {
     EXTERNAL: "allowed_comments_external",
     LICENSE: "allowed_comments_license",
     ISSUE: "allowed_comments_issue",
     DISALLOWED: "disallowed_comments",
 }
-ALLOWED_DB_ENTRIES = frozenset({"core/database.py", "tests/**"})
-TS_SUFFIXES = frozenset({".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"})
-STATUSES = frozenset({"강제됨", "판단(사람)", "문서뿐"})
-PROSE_ONLY = "문서뿐"
-TABLE_SECTION = "## 규칙과 강제 수단"
-TABLE_HEADER = ["규칙", "출처", "강제 수단", "상태"]
-REVERT_SUBJECT_RE = re.compile(r"^(?:Revert\b|revert(?:\(|:))")
-_TS_ANY_RE = re.compile(r":\s*any\b|\bas\s+any\b|<any>")
-_INSTALL_HINT = "cd frontend && bun install --frozen-lockfile 을 먼저 한다"
 
 
 class MetricError(Exception):
@@ -85,8 +55,8 @@ class MetricError(Exception):
         self.message = message
 
 
-KnipRunner = Callable[[Path], str]
-EslintRunner = Callable[[Path, list[str], list[str], list[dict[str, str]]], dict]
+KnipRunner = Callable[[Path, str], str]
+EslintRunner = Callable[[Path, str, list[str], list[str], list[dict[str, str]]], dict]
 
 
 @dataclass
@@ -94,6 +64,10 @@ class CheckResult:
     compared: dict[str, int] = field(default_factory=dict)
     notices: list[str] = field(default_factory=list)
     problems: list[Problem] = field(default_factory=list)
+
+
+def install_hint(directory: str) -> str:
+    return f"cd {directory or '.'} && bun install --frozen-lockfile 을 먼저 한다"
 
 
 def _toml(text: str, path: str) -> dict:
@@ -110,38 +84,38 @@ def _json(text: str, path: str) -> object:
         raise MetricError(path, error.lineno, f"JSON 을 읽지 못했다: {error.msg}") from error
 
 
-def count_services_to_routes(text: str) -> int:
-    contracts = _toml(text, PYPROJECT_PATH).get("tool", {}).get("importlinter", {}).get("contracts", [])
-    matches = [
-        contract
-        for contract in contracts
-        if isinstance(contract, dict)
-        and contract.get("source_modules") == ["src.services"]
-        and "src.routes" in contract.get("forbidden_modules", [])
-    ]
+def count_import_linter(text: str, path: str, name: str) -> int:
+    contracts = _toml(text, path).get("tool", {}).get("importlinter", {}).get("contracts", [])
+    matches = [contract for contract in contracts if isinstance(contract, dict) and contract.get("name") == name]
     if len(matches) != 1:
-        raise MetricError(PYPROJECT_PATH, 1, f"src.services ↛ src.routes 계약이 {len(matches)}개다(1개여야 한다)")
+        raise MetricError(
+            path,
+            1,
+            f"import-linter 계약 '{name}' 이 {len(matches)}개다(1개여야 한다) — "
+            "trust.toml [metrics.import_linter] contract 를 계약 name 과 맞춘다",
+        )
     ignored = matches[0].get("ignore_imports", [])
     if not isinstance(ignored, list):
-        raise MetricError(PYPROJECT_PATH, 1, "계약 2 의 ignore_imports 가 목록이 아니다")
+        raise MetricError(path, 1, f"계약 '{name}' 의 ignore_imports 가 목록이 아니다")
     return len(ignored)
 
 
-def count_direct_db_clients(text: str) -> int:
-    data = _toml(text, PYPROJECT_PATH)
+def count_banned_api(text: str, path: str, code: str, allow: Iterable[str] = ()) -> int:
+    data = _toml(text, path)
     if not settings.has_per_file_ignores(data):
-        raise MetricError(PYPROJECT_PATH, 1, "[tool.ruff.lint.per-file-ignores] 가 없다")
-    return sum(1 for pattern in settings.tid251_exceptions(data) if pattern not in ALLOWED_DB_ENTRIES)
+        raise MetricError(path, 1, "[tool.ruff.lint.per-file-ignores] 가 없다")
+    allowed = set(allow)
+    return sum(1 for pattern in settings.code_exceptions(data, code) if pattern not in allowed)
 
 
-def count_frontend_api_exceptions(text: str) -> int:
-    data = _json(text, ESLINT_EXCEPTIONS_PATH)
+def count_eslint_exceptions(text: str, path: str) -> int:
+    data = _json(text, path)
     if not isinstance(data, dict):
-        raise MetricError(ESLINT_EXCEPTIONS_PATH, 1, "최상위가 객체가 아니다")
+        raise MetricError(path, 1, "최상위가 객체가 아니다")
     total = 0
     for rule, paths in data.items():
-        if not isinstance(paths, list) or not all(isinstance(path, str) for path in paths):
-            raise MetricError(ESLINT_EXCEPTIONS_PATH, 1, f"'{rule}' 의 값이 경로 문자열 목록이 아니다")
+        if not isinstance(paths, list) or not all(isinstance(item, str) for item in paths):
+            raise MetricError(path, 1, f"'{rule}' 의 값이 경로 문자열 목록이 아니다")
         total += len(paths)
     return total
 
@@ -150,50 +124,48 @@ def count_ts_any(text: str) -> int:
     return len(_TS_ANY_RE.findall(text))
 
 
-def count_ty_baseline(text: str) -> int:
-    data = _json(text, TY_BASELINE_PATH)
+def count_ty_baseline(text: str, path: str) -> int:
+    data = _json(text, path)
     files = data.get("files") if isinstance(data, dict) else None
     if not isinstance(files, dict):
-        raise MetricError(TY_BASELINE_PATH, 1, "'files' 객체가 없다")
+        raise MetricError(path, 1, "'files' 객체가 없다")
     total = 0
-    for path, entries in files.items():
+    for name, entries in files.items():
         if not isinstance(entries, list):
-            raise MetricError(TY_BASELINE_PATH, 1, f"'{path}' 의 진단이 목록이 아니다")
+            raise MetricError(path, 1, f"'{name}' 의 진단이 목록이 아니다")
         total += len(entries)
     return total
 
 
-def count_knip(text: str) -> int:
+def count_knip(text: str, path: str) -> int:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as error:
-        raise MetricError(KNIP_PATH, 1, f"knip 출력이 JSON 이 아니다: {error.msg}") from error
+        raise MetricError(path, 1, f"knip 출력이 JSON 이 아니다: {error.msg}") from error
     issues = data.get("issues") if isinstance(data, dict) else None
     if not isinstance(issues, list):
-        raise MetricError(KNIP_PATH, 1, "knip 출력에 'issues' 목록이 없다")
+        raise MetricError(path, 1, "knip 출력에 'issues' 목록이 없다")
     return sum(
         len(value) for issue in issues if isinstance(issue, dict) for value in issue.values() if isinstance(value, list)
     )
 
 
-def count_ci_quarantine(text: str, path: str = BACKEND_TESTS) -> int:
+def count_ci_quarantine(text: str, path: str = "", marker: str = "ci_quarantine") -> int:
     try:
         tree = ast.parse(text)
     except SyntaxError as error:
         raise MetricError(path, error.lineno or 1, f"Python 문법 오류: {error.msg}") from error
     count = 0
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == QUARANTINE:
+        if isinstance(node, ast.Attribute) and node.attr == marker:
             count += 1
-        elif isinstance(node, ast.Name) and node.id == QUARANTINE:
+        elif isinstance(node, ast.Name) and node.id == marker:
             count += 1
-        elif isinstance(node, ast.alias) and QUARANTINE in (node.name.rsplit(".", 1)[-1], node.asname):
+        elif isinstance(node, ast.alias) and marker in (node.name.rsplit(".", 1)[-1], node.asname):
             count += 1
         elif isinstance(node, ast.Call):
             arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
-            count += sum(
-                1 for argument in arguments if isinstance(argument, ast.Constant) and argument.value == QUARANTINE
-            )
+            count += sum(1 for argument in arguments if isinstance(argument, ast.Constant) and argument.value == marker)
     return count
 
 
@@ -223,26 +195,25 @@ def _cells(line: str) -> list[str]:
     return cells
 
 
-def count_prose_only_rules(text: str) -> int:
+def count_prose_only_rules(text: str, path: str, heading: str) -> int:
+    section = f"## {heading}"
     lines = text.split("\n")
     try:
-        start = next(index for index, line in enumerate(lines) if line.strip() == TABLE_SECTION)
+        start = next(index for index, line in enumerate(lines) if line.strip() == section)
     except StopIteration:
-        raise MetricError(STANDARDS_PATH, 1, f"'{TABLE_SECTION}' 절이 없다") from None
+        raise MetricError(path, 1, f"'{section}' 절이 없다") from None
     end = next((index for index in range(start + 1, len(lines)) if lines[index].startswith("## ")), len(lines))
     rows = [(index + 1, lines[index]) for index in range(start + 1, end) if lines[index].lstrip().startswith("|")]
     if len(rows) < 2 or _cells(rows[0][1]) != TABLE_HEADER:
-        raise MetricError(
-            STANDARDS_PATH, start + 1, f"'{TABLE_SECTION}' 절에 '| 규칙 | 출처 | 강제 수단 | 상태 |' 표가 없다"
-        )
+        raise MetricError(path, start + 1, f"'{section}' 절에 '| 규칙 | 출처 | 강제 수단 | 상태 |' 표가 없다")
     count = 0
     for number, line in rows[2:]:
         cells = _cells(line)
         if len(cells) != len(TABLE_HEADER):
-            raise MetricError(STANDARDS_PATH, number, f"표 행의 칸이 {len(cells)}개다(4개여야 한다)")
+            raise MetricError(path, number, f"표 행의 칸이 {len(cells)}개다(4개여야 한다)")
         status = cells[3]
         if status not in STATUSES:
-            raise MetricError(STANDARDS_PATH, number, f"상태 '{status}' 는 강제됨·판단(사람)·문서뿐 중 하나가 아니다")
+            raise MetricError(path, number, f"상태 '{status}' 는 강제됨·판단(사람)·문서뿐 중 하나가 아니다")
         count += status == PROSE_ONLY
     return count
 
@@ -258,17 +229,28 @@ def comment_counts(scans: Iterable[FileScan]) -> dict[str, int]:
     return dict(sorted(counts.items()))
 
 
-def run_knip(root: Path) -> str:
-    binary = root / KNIP_PATH
-    if not binary.is_file():
-        raise MetricError(KNIP_PATH, 1, f"knip 이 없다 — {_INSTALL_HINT}")
+def _find_up(root: Path, directory: str, relative: str) -> Path | None:
+    top = root.resolve()
+    current = (root / directory).resolve()
+    while True:
+        candidate = current / relative
+        if candidate.exists():
+            return candidate
+        if current == top or current.parent == current:
+            return None
+        current = current.parent
+
+
+def run_knip(root: Path, directory: str) -> str:
+    label = join(directory, "node_modules/.bin/knip")
+    binary = _find_up(root, directory, "node_modules/.bin/knip")
+    if binary is None:
+        raise MetricError(label, 1, f"knip 이 없다 — {install_hint(directory)}")
     result = subprocess.run(
-        [str(binary), "--reporter", "json"], cwd=root / "frontend", capture_output=True, text=True, check=False
+        [str(binary), "--reporter", "json"], cwd=root / directory, capture_output=True, text=True, check=False
     )
     if result.returncode not in (0, 1):
-        raise MetricError(
-            KNIP_PATH, 1, f"knip 이 실패했다(종료 코드 {result.returncode}): {result.stderr.strip()[-300:]}"
-        )
+        raise MetricError(label, 1, f"knip 이 실패했다(종료 코드 {result.returncode}): {result.stderr.strip()[-300:]}")
     return result.stdout
 
 
@@ -292,17 +274,17 @@ def _source_problem(key: str, error: MetricError) -> Problem:
     )
 
 
-def _comment_metrics(root: Path, files: list[str]) -> tuple[dict[str, int] | None, list[Problem]]:
+def _comment_metrics(root: Path, config: Config, files: list[str]) -> tuple[dict[str, int] | None, list[Problem]]:
     items: list[tuple[str, str]] = []
     problems: list[Problem] = []
     for path in files:
-        if not is_target(path):
+        if not is_target(path, config.exclude):
             continue
         try:
             items.append((path, _read(root, path)))
         except MetricError as error:
             problems.append(Problem(path, 1, f"주석 수를 셀 수 없다({error.message}) — 파일을 UTF-8 로 저장한다"))
-    scans = scan_texts(items)
+    scans = scan_texts(items, config.ts_lib(root))
     for result in scans:
         if result.error is not None:
             problems.append(
@@ -316,35 +298,114 @@ def _comment_metrics(root: Path, files: list[str]) -> tuple[dict[str, int] | Non
 
 
 def _sum_files(
-    root: Path, files: list[str], prefix: str, suffixes: frozenset[str], counter: Callable[[str, str], int]
+    root: Path,
+    files: list[str],
+    directories: Sequence[str],
+    suffixes: frozenset[str],
+    counter: Callable[[str, str], int],
 ) -> int:
     return sum(
         counter(_read(root, path), path)
         for path in files
-        if path.startswith(prefix) and PurePosixPath(path).suffix in suffixes
+        if any(under(path, directory) for directory in directories) and PurePosixPath(path).suffix in suffixes
     )
 
 
-def collect(root: Path, knip: KnipRunner = run_knip) -> tuple[dict[str, int | None], list[Problem]]:
+def _computers(root: Path, config: Config, files: list[str], knip: KnipRunner) -> list[tuple[str, Callable[[], int]]]:
+    found: list[tuple[str, Callable[[], int]]] = []
+    if (linter := config.get(ImportLinter)) is not None:
+        found.append(
+            (linter.key, lambda: count_import_linter(_read(root, linter.pyproject), linter.pyproject, linter.contract))
+        )
+    if (banned := config.get(BannedApi)) is not None:
+        found.append(
+            (
+                banned.key,
+                lambda: count_banned_api(_read(root, banned.pyproject), banned.pyproject, banned.code, banned.allow),
+            )
+        )
+    if (eslint := config.get(Eslint)) is not None:
+        found.append((eslint.key, lambda: count_eslint_exceptions(_read(root, eslint.exceptions), eslint.exceptions)))
+    if (ts_any := config.get(TsAny)) is not None:
+        found.append(
+            (ts_any.key, lambda: _sum_files(root, files, ts_any.roots, TS_SUFFIXES, lambda text, _: count_ts_any(text)))
+        )
+    if (ty := config.get(Ty)) is not None:
+        found.append((ty.key, lambda: count_ty_baseline(_read(root, ty.baseline), ty.baseline)))
+    if (knip_section := config.get(Knip)) is not None:
+        found.append(
+            (
+                knip_section.key,
+                lambda: count_knip(knip(root, knip_section.dir), join(knip_section.dir, "node_modules/.bin/knip")),
+            )
+        )
+    if (quarantine := config.get(Quarantine)) is not None:
+        found.append(
+            (
+                quarantine.key,
+                lambda: _sum_files(
+                    root,
+                    files,
+                    (quarantine.tests,),
+                    frozenset({".py"}),
+                    lambda text, path: count_ci_quarantine(text, path, quarantine.marker),
+                ),
+            )
+        )
+    if (prose := config.get(ProseOnly)) is not None:
+        found.append((prose.key, lambda: count_prose_only_rules(_read(root, prose.doc), prose.doc, prose.heading)))
+    return found
+
+
+def _missing_sources(root: Path, config: Config) -> dict[str, list[Problem]]:
+    found: dict[str, list[Problem]] = {}
+    for name, section in config.sections.items():
+        problems: list[Problem] = []
+        for field_name, kind, _ in config_module.METRIC_SECTIONS[name][2]:
+            if kind not in ("dir", "dirs"):
+                continue
+            value = getattr(section, field_name)
+            for directory in (value,) if kind == "dir" else value:
+                if not (root / directory).is_dir():
+                    problems.append(
+                        Problem(
+                            config.label,
+                            settings.line_of(config.text, f"[metrics.{name}]"),
+                            f"[metrics.{name}] 의 {field_name} '{directory}' 폴더가 없다 — 경로를 고치거나 폴더를 되살린다. "
+                            "없는 폴더를 0 으로 세지 않는다",
+                        )
+                    )
+        if isinstance(section, Ty):
+            try:
+                _toml(_read(root, section.pyproject), section.pyproject)
+            except MetricError as error:
+                problems.append(
+                    Problem(
+                        error.path,
+                        error.line,
+                        f"[metrics.ty] 의 pyproject 를 읽지 못했다({error.message}) — 파일을 되살리거나 고친다. "
+                        "ty 설정 완화를 확인할 수 없고 다른 지표가 대신 확인하지 않는다",
+                    )
+                )
+        if problems:
+            found[section.key] = problems
+    return found
+
+
+def collect(root: Path, config: Config, knip: KnipRunner = run_knip) -> tuple[dict[str, int | None], list[Problem]]:
     files = repo_files(root)
-    values: dict[str, int | None] = dict.fromkeys(KEYS)
+    values: dict[str, int | None] = dict.fromkeys(config.metric_keys())
     problems: list[Problem] = []
-    single: dict[str, Callable[[], int]] = {
-        "services_to_routes_imports": lambda: count_services_to_routes(_read(root, PYPROJECT_PATH)),
-        "direct_db_clients": lambda: count_direct_db_clients(_read(root, PYPROJECT_PATH)),
-        "frontend_api_exceptions": lambda: count_frontend_api_exceptions(_read(root, ESLINT_EXCEPTIONS_PATH)),
-        "ts_any": lambda: _sum_files(root, files, FRONTEND_SRC, TS_SUFFIXES, lambda text, _: count_ts_any(text)),
-        "ty_baseline_entries": lambda: count_ty_baseline(_read(root, TY_BASELINE_PATH)),
-        "knip_unused": lambda: count_knip(knip(root)),
-        "ci_quarantine": lambda: _sum_files(root, files, BACKEND_TESTS, frozenset({".py"}), count_ci_quarantine),
-        "prose_only_rules": lambda: count_prose_only_rules(_read(root, STANDARDS_PATH)),
-    }
-    for key, compute in single.items():
+    missing = _missing_sources(root, config)
+    for key, compute in _computers(root, config, files, knip):
+        if key in missing:
+            problems.extend(missing[key])
+            continue
         try:
             values[key] = compute()
         except MetricError as error:
             problems.append(_source_problem(key, error))
-    counts, comment_problems = _comment_metrics(root, files)
+    counts, comment_problems = _comment_metrics(root, config, files)
     problems.extend(comment_problems)
     if counts is not None:
         values.update(counts)
@@ -362,22 +423,24 @@ def _key_line(text: str, key: str) -> int:
     return 1
 
 
-def parse_baseline(text: str, label: str) -> tuple[dict[str, int], list[Problem]]:
+def parse_values(text: str, label: str) -> tuple[dict[str, int], set[str], list[Problem]]:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as error:
-        return {}, [
-            Problem(label, error.lineno, f"기준선 JSON 을 읽지 못했다({error.msg}) — metrics --update 로 다시 만든다")
-        ]
+        return (
+            {},
+            set(),
+            [
+                Problem(
+                    label, error.lineno, f"기준선 JSON 을 읽지 못했다({error.msg}) — metrics --update 로 다시 만든다"
+                )
+            ],
+        )
     if not isinstance(data, dict):
-        return {}, [Problem(label, 1, "기준선이 JSON 객체가 아니다 — metrics --update 로 다시 만든다")]
+        return {}, set(), [Problem(label, 1, "기준선이 JSON 객체가 아니다 — metrics --update 로 다시 만든다")]
     values: dict[str, int] = {}
     problems: list[Problem] = []
-    for key in KEYS:
-        if key not in data:
-            problems.append(Problem(label, 1, f"기준선에 열쇠 {key} 가 없다 — metrics --update 로 다시 만든다"))
-            continue
-        value = data[key]
+    for key, value in data.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             problems.append(
                 Problem(
@@ -386,16 +449,30 @@ def parse_baseline(text: str, label: str) -> tuple[dict[str, int], list[Problem]
             )
             continue
         values[key] = value
-    problems.extend(
+    return values, set(data), problems
+
+
+def parse_baseline(text: str, label: str, keys: Sequence[str]) -> tuple[dict[str, int], list[Problem]]:
+    values, present, problems = parse_values(text, label)
+    if not present and problems:
+        return {}, problems
+    known = set(keys)
+    missing = [
+        Problem(label, 1, f"기준선에 열쇠 {key} 가 없다 — metrics --update 로 다시 만든다")
+        for key in keys
+        if key not in present
+    ]
+    unknown = [
         Problem(
             label,
             _key_line(text, key),
-            f"기준선의 열쇠 {key} 는 모르는 열쇠다 — 지운다. 지표를 더하려면 metrics 코드에 먼저 더한다",
+            f"기준선의 열쇠 {key} 는 켜진 지표가 아니다 — 지운다. 지표를 켜려면 trust.toml 에 [metrics.…] 절을 더한다",
         )
-        for key in data
-        if key not in KEYS
-    )
-    return values, problems
+        for key in present
+        if key not in known
+    ]
+    bad = [problem for problem in problems if any(f"기준선 {key} 값" in problem.message for key in known)]
+    return {key: value for key, value in values.items() if key in known}, [*missing, *bad, *unknown]
 
 
 def _verify_ref(root: Path, ref: str) -> None:
@@ -417,9 +494,15 @@ def _approval_hint() -> str:
 
 
 def _compare_current(
-    result: CheckResult, current: Mapping[str, int | None], reference: Mapping[str, int], text: str, is_approved: bool
+    result: CheckResult,
+    keys: Sequence[str],
+    current: Mapping[str, int | None],
+    reference: Mapping[str, int],
+    path: str,
+    text: str,
+    is_approved: bool,
 ) -> None:
-    for key in KEYS:
+    for key in keys:
         now = current.get(key)
         before = reference.get(key)
         if now is None or before is None:
@@ -429,7 +512,7 @@ def _compare_current(
             if is_approved:
                 result.notices.append(f"알림: {key} 증가({before} → {now})는 {LABEL} 표지로 통과한다")
             else:
-                result.problems.append(Problem(BASELINE_PATH, _key_line(text, key), message))
+                result.problems.append(Problem(path, _key_line(text, key), message))
         elif now < before:
             result.notices.append(
                 f"알림: {key} 가 기준선 {before} 보다 줄었다(현재 {now}) — 원하면 metrics --update 로 기준선을 낮춘다"
@@ -437,9 +520,15 @@ def _compare_current(
 
 
 def _compare_baselines(
-    result: CheckResult, worktree: Mapping[str, int], base: Mapping[str, int], text: str, is_approved: bool
+    result: CheckResult,
+    keys: Sequence[str],
+    worktree: Mapping[str, int],
+    base: Mapping[str, int],
+    path: str,
+    text: str,
+    is_approved: bool,
 ) -> None:
-    for key in KEYS:
+    for key in keys:
         mine = worktree.get(key)
         theirs = base.get(key)
         if mine is None or theirs is None or mine <= theirs:
@@ -449,33 +538,34 @@ def _compare_baselines(
         else:
             result.problems.append(
                 Problem(
-                    BASELINE_PATH,
+                    path,
                     _key_line(text, key),
                     f"PR 의 기준선 값 {key}={mine} 가 기준 ref 값 {theirs} 보다 크다 — 되돌린다. {_approval_hint()}",
                 )
             )
 
 
-def _compare_ty(result: CheckResult, root: Path, ref: str, is_approved: bool) -> None:
-    base_text, effective = _baseline_source(root, ref, TY_BASELINE_PATH)
-    work_text = _read_optional(root, TY_BASELINE_PATH)
+def _compare_ty(result: CheckResult, root: Path, ty: Ty, ref: str, is_approved: bool) -> None:
+    path = ty.baseline
+    source = history_source(root, ref, path)
+    base_text, effective = source.text, source.effective
+    work_text = _read_optional(root, path)
     if base_text is None or effective is None:
-        result.notices.append(f"알림: 기준 ref 에 {TY_BASELINE_PATH} 가 없어 ty 기준선 항목 수는 비교하지 않는다")
+        if source.seen:
+            result.problems.append(Problem(path, 1, _unrestorable_message(ref, path, "ty 기준선", source.reason)))
+        else:
+            result.notices.append(f"알림: 기준 ref 에 {path} 가 없어 ty 기준선 항목 수는 비교하지 않는다")
         return
     if effective != ref:
-        result.notices.append(
-            f"알림: 기준 ref({ref})에는 {TY_BASELINE_PATH} 가 없다 — 지워진 ty 기준선({effective})과 비교한다"
-        )
+        result.notices.append(f"알림: 기준 ref({ref})에는 {path} 가 없다 — 지워진 ty 기준선({effective})과 비교한다")
     if work_text is None:
-        result.problems.append(
-            Problem(TY_BASELINE_PATH, 1, _deleted_message(ref, effective, TY_BASELINE_PATH, "ty 기준선"))
-        )
+        result.problems.append(Problem(path, 1, _deleted_message(ref, effective, path, "ty 기준선")))
         return
     try:
-        before = count_ty_baseline(base_text)
-        after = count_ty_baseline(work_text)
+        before = count_ty_baseline(base_text, path)
+        after = count_ty_baseline(work_text, path)
     except MetricError as error:
-        result.problems.append(_source_problem("ty_baseline_entries", error))
+        result.problems.append(_source_problem(ty.key, error))
         return
     if after <= before:
         return
@@ -484,7 +574,7 @@ def _compare_ty(result: CheckResult, root: Path, ref: str, is_approved: bool) ->
         return
     result.problems.append(
         Problem(
-            TY_BASELINE_PATH,
+            path,
             1,
             f"ty 기준선 진단 항목이 기준 ref 보다 늘었다({before} → {after}) — 새 타입 오류를 고치고 기준선을 되돌린다. "
             f"{_approval_hint()}",
@@ -492,16 +582,52 @@ def _compare_ty(result: CheckResult, root: Path, ref: str, is_approved: bool) ->
     )
 
 
-def _baseline_source(root: Path, ref: str, path: str) -> tuple[str | None, str | None]:
+@dataclass(frozen=True)
+class HistorySource:
+    text: str | None
+    effective: str | None
+    seen: bool
+    reason: str = ""
+
+
+def _parent_specs(commit: str, count: int) -> list[str]:
+    return [f"{commit}^" if index == 1 else f"{commit}^{index}" for index in range(1, count + 1)]
+
+
+def history_source(root: Path, ref: str, path: str) -> HistorySource:
     text = _show_text(root, ref, path)
     if text is not None:
-        return text, ref
-    last = gitfiles.git(root, "log", "-1", "--format=%H", ref, "--", path).decode().strip()
-    if not last:
-        return None, None
-    parent = f"{last}^"
-    previous = _show_text(root, parent, path)
-    return (previous, parent) if previous is not None else (None, None)
+        return HistorySource(text, ref, True)
+    found = (
+        gitfiles.git(root, "log", "-1", "--full-history", "--topo-order", "--format=%H %P", ref, "--", path)
+        .decode()
+        .split()
+    )
+    if found:
+        commit, *parents = found
+        candidates = [commit, *_parent_specs(commit, len(parents))]
+    else:
+        parents = gitfiles.git(root, "rev-list", "--parents", "-n", "1", ref).decode().split()[1:]
+        candidates = _parent_specs(ref, len(parents))
+    for spec in candidates:
+        previous = _show_text(root, spec, path)
+        if previous is not None:
+            return HistorySource(previous, spec, True)
+    if found:
+        return HistorySource(None, None, True, f"{found[0]} 과 그 부모 어디에도 {path} 가 없다")
+    if gitfiles.is_shallow(root):
+        return HistorySource(
+            None, None, True, "얕은 클론이라 이력에 없다고 확인할 수 없다 — 전체 이력을 받는다(fetch-depth: 0)"
+        )
+    return HistorySource(None, None, False)
+
+
+def _unrestorable_message(ref: str, path: str, label: str, reason: str) -> str:
+    return (
+        f"기준 ref({ref}) 이력에 있던 {label}을 되살리지 못해 비교할 수 없다({reason}) — "
+        f"git log --full-history {ref} -- {path} 로 마지막 판을 찾아 되살린다. {label} 비교 실패는 {LABEL} 표지로도 "
+        "통과하지 않는다"
+    )
 
 
 def _gate(result: CheckResult, problems: list[Problem], is_approved: bool) -> None:
@@ -529,63 +655,238 @@ def _parse_json(text: str | None) -> object:
         return None
 
 
-def frontend_files(root: Path, files: Iterable[str]) -> list[str]:
-    return [
-        path.removeprefix("frontend/")
-        for path in files
-        if path.startswith(FRONTEND_SRC) and PurePosixPath(path).suffix in ESLINT_SUFFIXES
-    ]
+def eslint_files(files: Iterable[str], directory: str, contract: EslintContract) -> list[str]:
+    selected: list[str] = []
+    for path in files:
+        if not under(path, directory) or path == directory:
+            continue
+        relative = path[len(directory) + 1 :] if directory else path
+        if contract.selects(relative):
+            selected.append(relative)
+    return selected
 
 
-def run_eslint(
-    root: Path, files: list[str], rules: Iterable[str] = FRONTEND_API_RULES, probes: Iterable[dict[str, str]] = ()
-) -> dict:
+def run_eslint(root: Path, directory: str, files: list[str], rules: list[str], probes: list[dict[str, str]]) -> dict:
+    label = settings.eslint_config_label(root, directory)
     bun = shutil.which("bun")
     if bun is None:
-        raise MetricError(ESLINT_CONFIG_PATH, 1, f"bun 이 없다 — {_INSTALL_HINT}")
-    if not (TOOL_FRONTEND / "node_modules/eslint/package.json").is_file():
-        raise MetricError(ESLINT_CONFIG_PATH, 1, f"eslint 이 없다 — {_INSTALL_HINT}")
+        raise MetricError(label, 1, f"bun 이 없다 — {install_hint(directory)}")
+    if _find_up(root, directory, "node_modules/eslint/package.json") is None:
+        raise MetricError(label, 1, f"eslint 이 없다 — {install_hint(directory)}")
     result = subprocess.run(
-        [bun, str(ESLINT_HELPER), str(TOOL_FRONTEND), str(root / "frontend")],
-        input=json.dumps({"files": files, "rules": list(rules), "probes": list(probes)}),
+        [bun, str(ESLINT_HELPER), str(root / directory)],
+        input=json.dumps({"files": files, "rules": rules, "probes": probes}),
         capture_output=True,
         text=True,
         check=False,
     )
     if result.returncode != 0:
-        raise MetricError(ESLINT_CONFIG_PATH, 1, f"eslint 설정 계산이 실패했다: {result.stderr.strip()[-300:]}")
+        raise MetricError(label, 1, f"eslint 설정 계산이 실패했다: {result.stderr.strip()[-300:]}")
     return json.loads(result.stdout)
 
 
-def _settings(result: CheckResult, root: Path, base_ref: str | None, is_approved: bool, eslint: EslintRunner) -> None:
+def _pyproject_pair(root: Path, path: str, base_ref: str | None) -> tuple[str, dict, dict | None] | None:
+    text = _read_optional(root, path)
+    work = _parse_toml(text)
+    if text is None or work is None:
+        return None
+    base = _parse_toml(_show_text(root, base_ref, path)) if base_ref else None
+    return text, work, base
+
+
+def _banned_api_problems(root: Path, section: BannedApi, base_ref: str | None) -> list[Problem]:
+    pair = _pyproject_pair(root, section.pyproject, base_ref)
+    if pair is None:
+        return []
+    text, work, base = pair
+    project_dir = root / PurePosixPath(section.pyproject).parent
+    found = settings.banned_api_absolute_problems(
+        section.pyproject, text, work, project_dir, section.code, section.allow
+    )
+    if base is not None:
+        found.extend(settings.banned_api_relative_problems(section.pyproject, text, base, work, section.code))
+    return found
+
+
+def _import_linter_problems(root: Path, section: ImportLinter, base_ref: str | None) -> list[Problem]:
+    pair = _pyproject_pair(root, section.pyproject, base_ref)
+    if pair is None:
+        return []
+    text, work, base = pair
+    return [] if base is None else settings.import_linter_relative_problems(section.pyproject, text, base, work)
+
+
+def _ty_setting_problems(root: Path, section: Ty, base_ref: str | None) -> list[Problem]:
+    pair = _pyproject_pair(root, section.pyproject, base_ref)
+    if pair is None:
+        return []
+    text, work, base = pair
+    return [] if base is None else settings.ty_relative_problems(section.pyproject, text, base, work)
+
+
+def _load_contract(root: Path, section: Eslint) -> tuple[EslintContract | None, str | None, list[Problem]]:
+    text = _read_optional(root, section.contract)
+    if text is None:
+        return (
+            None,
+            None,
+            [Problem(section.contract, 1, "eslint 계약 파일이 없다 — README 의 eslint 계약 절 모양으로 만든다")],
+        )
+    try:
+        return settings.parse_contract(text), text, []
+    except ContractError as error:
+        return (
+            None,
+            text,
+            [
+                Problem(
+                    section.contract,
+                    1,
+                    f"eslint 계약 파일 모양이 틀렸다({error}) — README 의 eslint 계약 절 모양으로 고친다",
+                )
+            ],
+        )
+
+
+def _eslint_problems(
+    result: CheckResult, root: Path, section: Eslint, base_ref: str | None, eslint: EslintRunner
+) -> list[Problem]:
     gated: list[Problem] = []
-    work_text = _read_optional(root, PYPROJECT_PATH)
-    work = _parse_toml(work_text)
-    if work_text is not None and work is not None:
-        gated.extend(settings.pyproject_absolute_problems(work_text, work, root))
-        base = _parse_toml(_show_text(root, base_ref, PYPROJECT_PATH)) if base_ref else None
-        if base is not None:
-            gated.extend(settings.pyproject_relative_problems(work_text, base, work))
-    exceptions_text = _read_optional(root, ESLINT_EXCEPTIONS_PATH)
+    contract, contract_text, problems = _load_contract(root, section)
+    result.problems.extend(problems)
+    exceptions_text = _read_optional(root, section.exceptions)
     exceptions = _parse_json(exceptions_text)
     if base_ref and exceptions_text is not None:
-        base_exceptions = _parse_json(_show_text(root, base_ref, ESLINT_EXCEPTIONS_PATH))
+        base_exceptions = _parse_json(_show_text(root, base_ref, section.exceptions))
         if base_exceptions is not None:
-            gated.extend(settings.eslint_exception_problems(exceptions_text, base_exceptions, exceptions))
-    exception_map = exceptions if isinstance(exceptions, dict) else {}
-    rules = list(dict.fromkeys([*FRONTEND_API_RULES, *exception_map]))
-    files = frontend_files(root, repo_files(root))
-    if files:
-        try:
-            results = eslint(root, files, rules, settings.eslint_probes(files))
-        except MetricError as error:
-            result.problems.append(
-                Problem(error.path, error.line, f"eslint 설정을 확인하지 못했다({error.message}) — {_INSTALL_HINT}")
+            gated.extend(
+                settings.eslint_exception_problems(section.exceptions, exceptions_text, base_exceptions, exceptions)
             )
-        else:
-            gated.extend(eslint_level_problems(results.get("files", {}), exception_map, rules))
-            gated.extend(settings.eslint_contract_problems(results.get("probes", []), exception_map))
+    if base_ref and contract_text is not None:
+        base_contract = _show_text(root, base_ref, section.contract)
+        if base_contract is not None and _parse_json(base_contract) != _parse_json(contract_text):
+            gated.append(
+                Problem(
+                    section.contract, 1, f"eslint 계약 파일이 기준 ref 와 다르다 — 되돌린다. {settings.gate_hint()}"
+                )
+            )
+    if contract is None:
+        return gated
+    exception_map = exceptions if isinstance(exceptions, dict) else {}
+    rules = contract.rules(exception_map)
+    files = eslint_files(repo_files(root), section.dir, contract)
+    if not files:
+        return gated
+    try:
+        results = eslint(root, section.dir, files, rules, settings.eslint_probes(files, contract))
+    except MetricError as error:
+        result.problems.append(
+            Problem(
+                error.path,
+                error.line,
+                f"eslint 설정을 확인하지 못했다({error.message}) — {install_hint(section.dir)}",
+            )
+        )
+        return gated
+    gated.extend(settings.eslint_level_problems(section.dir, results.get("files", {}), exception_map, rules, contract))
+    gated.extend(
+        settings.eslint_contract_problems(
+            settings.eslint_config_label(root, section.dir), results.get("probes", []), exception_map, contract
+        )
+    )
+    return gated
+
+
+def _settings(
+    result: CheckResult, root: Path, config: Config, base_ref: str | None, is_approved: bool, eslint: EslintRunner
+) -> None:
+    gated: list[Problem] = []
+    if (banned := config.get(BannedApi)) is not None:
+        gated.extend(_banned_api_problems(root, banned, base_ref))
+    if (linter := config.get(ImportLinter)) is not None:
+        gated.extend(_import_linter_problems(root, linter, base_ref))
+    if (ty := config.get(Ty)) is not None:
+        gated.extend(_ty_setting_problems(root, ty, base_ref))
+    if (section := config.get(Eslint)) is not None:
+        gated.extend(_eslint_problems(result, root, section, base_ref, eslint))
     _gate(result, gated, is_approved)
+
+
+def config_problems(base: Config, work: Config, text: str) -> list[Problem]:
+    found: list[Problem] = []
+
+    def add(needle: str, message: str) -> None:
+        found.append(Problem(work.label, settings.line_of(text, needle), f"{message} {settings.gate_hint()}"))
+
+    for pattern in work.exclude:
+        if pattern not in base.exclude:
+            add(
+                f'"{pattern}"',
+                f"주석 검사 제외 '{pattern}' 를 새로 더했다 — 지운다. 제외는 고칠 수 없는 파일에만 쓴다.",
+            )
+    for name in base.forbid_names:
+        if name not in work.forbid_names:
+            add("forbid_names", f"[repo] forbid_names 에서 '{name}' 를 뺐다 — 되돌린다.")
+    for directory in base.tool_settings_dirs:
+        if directory not in work.tool_settings_dirs:
+            add("tool_settings_dirs", f"[repo] tool_settings_dirs 에서 '{directory or '.'}' 를 뺐다 — 되돌린다.")
+    if base.baseline != work.baseline:
+        add("baseline", "[trust] baseline 경로를 바꿨다 — 되돌린다.")
+    if base.node_modules != work.node_modules:
+        add("node_modules", "[trust] node_modules 경로를 바꿨다 — TS/JS 판정기가 바뀐다. 되돌린다.")
+    for name in base.tables:
+        if name not in work.tables:
+            add("[metrics", f"[metrics.{name}] 절을 지워 지표를 껐다 — 되돌린다.")
+    for name, table in work.tables.items():
+        before = base.tables.get(name)
+        if before is not None and before != table:
+            add(f"[metrics.{name}]", f"[metrics.{name}] 설정이 기준 ref 와 다르다 — 되돌린다.")
+    for name, section in work.sections.items():
+        previous = base.sections.get(name)
+        if previous is not None and previous.key != section.key:
+            add(
+                f"[metrics.{name}]",
+                f"[metrics.{name}] 의 열쇠 이름(key)을 '{previous.key}' 에서 '{section.key}' 로 바꿨다 — 되돌린다. "
+                "열쇠를 바꾸면 다른 지표의 기준선과 비교된다.",
+            )
+    return found
+
+
+def _compare_config(result: CheckResult, root: Path, config: Config, ref: str) -> tuple[Config | None, list[Problem]]:
+    source = history_source(root, ref, CONFIG_NAME)
+    text, effective = source.text, source.effective
+    if not source.seen:
+        result.notices.append(
+            f"알림: 기준 ref({ref}) 이력에 {CONFIG_NAME} 이 없다 — 첫 도입으로 보고 설정 완화는 비교하지 않는다"
+        )
+        return None, []
+    if text is None or effective is None:
+        return None, [
+            Problem(
+                CONFIG_NAME,
+                1,
+                f"기준 ref({ref}) 이력에 있던 {CONFIG_NAME} 을 되살리지 못해 설정 완화를 비교할 수 없다"
+                f"({source.reason}) — git log --full-history {ref} -- {CONFIG_NAME} 로 마지막 판을 찾아 되살린다. "
+                f"{settings.gate_hint()}",
+            )
+        ]
+    label = f"{effective}:{CONFIG_NAME}"
+    if effective != ref:
+        result.notices.append(f"알림: 기준 ref({ref})에는 {CONFIG_NAME} 이 없다 — 지워진 설정({effective})과 비교한다")
+    if config.relative != CONFIG_NAME:
+        result.notices.append(f"알림: 고른 설정 {config.label} 을 기준 설정 {label} 과 비교한다")
+    try:
+        base = config_module.parse(text, label, CONFIG_NAME, root)
+    except ConfigError as error:
+        return None, [
+            Problem(
+                CONFIG_NAME,
+                1,
+                f"기준 설정을 읽지 못해 설정 완화를 비교할 수 없다({error}) — 기준 설정을 이 판의 trust-checks 로 "
+                f"읽을 수 있는지 확인한다. {settings.gate_hint()}",
+            )
+        ]
+    return base, config_problems(base, config, config.text)
 
 
 def _deleted_message(ref: str, effective: str, path: str, label: str) -> str:
@@ -596,50 +897,98 @@ def _deleted_message(ref: str, effective: str, path: str, label: str) -> str:
     return f"{label} 파일이 없다 — {where}. {label} 삭제는 {LABEL} 표지로도 통과하지 않는다"
 
 
+def _reference_values(
+    result: CheckResult,
+    config: Config,
+    base: Mapping[str, int],
+    present: set[str],
+    worktree: Mapping[str, int],
+    text: str,
+) -> tuple[dict[str, int], list[Problem]]:
+    keys = config.metric_keys()
+    reference: dict[str, int] = {}
+    gated: list[Problem] = []
+    for key in keys:
+        if key in base:
+            reference[key] = base[key]
+        elif key not in present and key in worktree:
+            reference[key] = worktree[key]
+            result.notices.append(
+                f"알림: 기준 ref 기준선에 {key} 가 없다 — 새로 켠 지표로 보고 작업 트리 기준선 값 {worktree[key]} 과 비교한다"
+            )
+    for key in sorted(present - set(keys)):
+        gated.append(
+            Problem(
+                config.baseline,
+                _key_line(text, key),
+                f"기준 ref 기준선에 있는 지표 {key} 가 지금 꺼져 있다 — {config.label} 의 [metrics.…] 절(또는 key)을 되돌린다. "
+                f"{settings.gate_hint()}",
+            )
+        )
+    return reference, gated
+
+
 def check(
-    root: Path, ref: str, current: Mapping[str, int | None], is_approved: bool, eslint: EslintRunner = run_eslint
+    root: Path,
+    config: Config,
+    ref: str,
+    current: Mapping[str, int | None],
+    is_approved: bool,
+    eslint: EslintRunner = run_eslint,
 ) -> CheckResult:
     _verify_ref(root, ref)
     result = CheckResult()
-    work_text = _read_optional(root, BASELINE_PATH)
+    keys = config.metric_keys()
+    path = config.baseline
+    ty = config.get(Ty)
+    work_text = _read_optional(root, path)
     worktree: dict[str, int] = {}
     if work_text is not None:
-        worktree, problems = parse_baseline(work_text, BASELINE_PATH)
+        worktree, problems = parse_baseline(work_text, path, keys)
         result.problems.extend(problems)
-    base_text, effective = _baseline_source(root, ref, BASELINE_PATH)
+    base_config, config_gated = _compare_config(result, root, config, ref)
+    _gate(result, config_gated, is_approved)
+    base_path = base_config.baseline if base_config is not None else path
+    source = history_source(root, ref, base_path)
+    base_text, effective = source.text, source.effective
     if base_text is None or effective is None:
-        result.notices.append(f"알림: 기준 ref 에 {BASELINE_PATH} 이 없어 작업 트리 파일과 비교한다")
+        if source.seen:
+            result.problems.append(Problem(path, 1, _unrestorable_message(ref, base_path, "기준선", source.reason)))
+        else:
+            result.notices.append(f"알림: 기준 ref 에 {base_path} 이 없어 작업 트리 파일과 비교한다")
         if work_text is None:
-            result.problems.append(Problem(BASELINE_PATH, 1, "기준선 파일이 없다 — metrics --update 로 만든다"))
+            result.problems.append(Problem(path, 1, "기준선 파일이 없다 — metrics --update 로 만든다"))
         else:
             result.compared = worktree
-            _compare_current(result, current, worktree, work_text, is_approved)
-        _compare_ty(result, root, ref, is_approved)
-        _settings(result, root, None, is_approved, eslint)
+            _compare_current(result, keys, current, worktree, path, work_text, is_approved)
+        if ty is not None:
+            _compare_ty(result, root, ty, ref, is_approved)
+        _settings(result, root, config, None, is_approved, eslint)
         return result
     if effective != ref:
-        result.notices.append(
-            f"알림: 기준 ref({ref})에는 {BASELINE_PATH} 이 없다 — 지워진 기준선({effective})과 비교한다"
-        )
+        result.notices.append(f"알림: 기준 ref({ref})에는 {base_path} 이 없다 — 지워진 기준선({effective})과 비교한다")
     if work_text is None:
-        result.problems.append(Problem(BASELINE_PATH, 1, _deleted_message(ref, effective, BASELINE_PATH, "기준선")))
-    base, problems = parse_baseline(base_text, f"{effective}:{BASELINE_PATH}")
+        result.problems.append(Problem(path, 1, _deleted_message(ref, effective, base_path, "기준선")))
+    base, present, problems = parse_values(base_text, f"{effective}:{base_path}")
     result.problems.extend(problems)
-    result.compared = base
-    _compare_current(result, current, base, work_text or base_text, is_approved)
-    _compare_baselines(result, worktree, base, work_text or base_text, is_approved)
-    _compare_ty(result, root, ref, is_approved)
-    _settings(result, root, effective, is_approved, eslint)
+    reference, gated = _reference_values(result, config, base, present, worktree, base_text)
+    result.compared = reference
+    _compare_current(result, keys, current, reference, path, work_text or base_text, is_approved)
+    _compare_baselines(result, keys, worktree, base, path, work_text or base_text, is_approved)
+    if ty is not None:
+        _compare_ty(result, root, ty, ref, is_approved)
+    _gate(result, gated, is_approved)
+    _settings(result, root, config, effective, is_approved, eslint)
     return result
 
 
-def worktree_baseline(root: Path) -> dict[str, int]:
-    text = _read_optional(root, BASELINE_PATH)
-    return {} if text is None else parse_baseline(text, BASELINE_PATH)[0]
+def worktree_baseline(root: Path, config: Config) -> dict[str, int]:
+    text = _read_optional(root, config.baseline)
+    return {} if text is None else parse_values(text, config.baseline)[0]
 
 
-def write_baseline(root: Path, values: Mapping[str, int]) -> Path:
-    path = root / BASELINE_PATH
+def write_baseline(root: Path, config: Config, values: Mapping[str, int]) -> Path:
+    path = root / config.baseline
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_baseline(values), encoding="utf-8")
     return path
@@ -651,9 +1000,9 @@ def revert_ratio(root: Path) -> tuple[int, int]:
     return sum(1 for subject in subjects if REVERT_SUBJECT_RE.match(subject)), len(merges)
 
 
-def metric_lines(current: Mapping[str, int | None], baseline: Mapping[str, int]) -> list[str]:
+def metric_lines(keys: Sequence[str], current: Mapping[str, int | None], baseline: Mapping[str, int]) -> list[str]:
     lines = []
-    for key in KEYS:
+    for key in keys:
         now = current.get(key)
         shown = "읽지 못함" if now is None else str(now)
         before = baseline.get(key)
