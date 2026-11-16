@@ -159,6 +159,26 @@ class TestTypeScript:
         text = "export const A = () => (\n  <div>\n    http://x // no\n    {/* yes */}\n  </div>\n);\n"
         assert lines_of("x.tsx", text) == [4]
 
+    def test_jsx_file_is_target_and_judged_by_typescript(self):
+        text = (
+            "// 외부: 브라우저 제약\n"
+            "export const A = () => (\n"
+            "  <div>\n"
+            "    http://x // no\n"
+            "    {/* 설명 */}\n"
+            "  </div>\n"
+            ");\n"
+            "const b = 1; // 줄 주석\n"
+        )
+        assert is_target("web/src/A.jsx")
+        comments = scan_text("x.jsx", text).comments
+        assert [(comment.line, comment.category) for comment in comments] == [
+            (1, EXTERNAL),
+            (5, DISALLOWED),
+            (8, DISALLOWED),
+        ]
+        assert len(problems("x.jsx", text)) == 2
+
     def test_comment_inside_template_expression_is_comment(self):
         text = "const a = `x ${\n  1 // yes\n} y`;\n"
         assert lines_of("x.js", text) == [2]

@@ -21,6 +21,7 @@ LANGUAGES = {
     ".ts": "ts",
     ".tsx": "ts",
     ".js": "ts",
+    ".jsx": "ts",
     ".mjs": "ts",
     ".cjs": "ts",
     ".rs": "rust",

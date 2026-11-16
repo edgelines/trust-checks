@@ -174,7 +174,7 @@ contract = "frontend/eslint-contract.json"
 
 ## 주석 규칙 요약
 
-- **대상:** `.py` `.pyi` `.ts` `.tsx` `.js` `.mjs` `.cjs` `.rs` `.sh` `.bash` `.yml` `.yaml` `.toml`, 이름이 `Dockerfile` 로 시작하는 파일. 시험 코드도 대상
+- **대상:** `.py` `.pyi` `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` `.rs` `.sh` `.bash` `.yml` `.yaml` `.toml`, 이름이 `Dockerfile` 로 시작하는 파일. 시험 코드도 대상
 - **주석 판정:** 언어 구문을 아는 스캐너로 판정한다. Python 은 `#` 와 docstring(모듈·클래스·함수 첫 문장, 1행 shebang·1~2행 인코딩 선언 제외), TS/JS 는 TypeScript 스캐너(문자열·템플릿·정규식 안은 주석 아님, 맨 위 `/// <reference …/>` 지시문 제외), Rust 는 `//`·`/* */`(중첩), 셸은 따옴표·heredoc·산술 밖의 낱말 첫 `#`, YAML·TOML 은 그 언어의 주석(블록 스칼라 안은 문자열)
 - **허용(1%):** 본문이 `외부: `(바깥 제약), `라이선스`, 이슈 주소(`https://…/issues/<숫자>`) 로 시작하거나 검사 끄기 표시
 - **검사 끄기 표시:** `noqa`, `type: ignore`, `ty: ignore`, `pyright: ignore`, `pragma: no cover`, `fmt: off/on/skip`, `eslint-disable`(전 형태), `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, `prettier-ignore`, `istanbul ignore`, `c8 ignore`, `shellcheck disable`. 같은 줄에 `<이유> · 만료 YYYY-MM-DD`(eslint 는 `-- <이유> · 만료 …`)를 붙이거나, 바로 윗줄에 `검사 끄기: <이유> · 만료 YYYY-MM-DD` 주석을 둔다
