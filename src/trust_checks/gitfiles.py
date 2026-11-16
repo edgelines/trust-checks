@@ -43,6 +43,10 @@ def merge_base(root: Path, ref: str) -> str:
     return git(root, "merge-base", ref, "HEAD").decode().strip()
 
 
+def is_shallow(root: Path) -> bool:
+    return git(root, "rev-parse", "--is-shallow-repository").decode().strip() == "true"
+
+
 def has_head(root: Path) -> bool:
     result = subprocess.run(
         ["git", "-C", str(root), "rev-parse", "--verify", "--quiet", "HEAD"], capture_output=True, check=False

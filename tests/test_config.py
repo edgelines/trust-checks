@@ -15,6 +15,7 @@ from support import (
     METRICS_TOML,
     REPO,
     TODAY_ENV,
+    TY_BASELINE_PATH,
     baseline_with,
     check_fails_without_label,
     commit_all,
@@ -27,6 +28,7 @@ from support import (
     run,
     run_metrics,
     write,
+    write_sources,
 )
 
 from trust_checks import cli, config, metrics, settings
@@ -478,6 +480,76 @@ class TestBaseConfigBinding:
         commit_all(metrics_repo, "config from another version")
         write(metrics_repo, "trust.toml", METRICS_TOML)
         check_fails_without_label(metrics_repo, capsys, "기준 설정을 읽지 못해 설정 완화를 비교할 수 없다")
+
+
+def merged_repo(root: Path, strict_on_main: bool, dropped: str) -> Path:
+    init_repo(root)
+    write(root, "side.txt", "root\n")
+    commit_all(root, "root before trust")
+    git(root, "branch", "side")
+    strict, plain = ("main", "side") if strict_on_main else ("side", "main")
+    git(root, "checkout", "-q", strict)
+    write_sources(root)
+    write(root, BASELINE_PATH, metrics.render_baseline(EXPECTED))
+    commit_all(root, "adopt strict trust")
+    git(root, "checkout", "-q", plain)
+    write(root, "side.txt", "unrelated\n")
+    commit_all(root, "unrelated change")
+    git(root, "checkout", "-q", "main")
+    git(root, "merge", "-q", "--no-ff", "--no-commit", "side")
+    git(root, "rm", "-q", "-f", dropped)
+    git(root, "commit", "-q", "-m", "merge dropping")
+    assert git(root, "log", "-1", "--format=%H", "HEAD", "--", dropped).strip() == ""
+    return root
+
+
+class TestMergeHistory:
+    @pytest.mark.parametrize(("strict_on_main", "parent"), [(True, "^"), (False, "^2")])
+    def test_config_dropped_in_merge_is_not_first_introduction(self, tmp_path, capsys, strict_on_main, parent):
+        root = merged_repo(tmp_path / "merged", strict_on_main, "trust.toml")
+        write(root, "trust.toml", WEAK_TOML)
+        write(root, "alternate.json", metrics.render_baseline({key: 0 for key in config.COMMENT_KEYS}))
+        write(root, "web/src/b.ts", "export const b: any = 1;\n")
+        assert run_metrics(root, "--check", "--base", "HEAD") == 1
+        out = capsys.readouterr().out
+        assert "첫 도입" not in out
+        merge = git(root, "rev-parse", "HEAD").strip()
+        assert f"지워진 설정({merge}{parent})과 비교한다" in out
+        for needle in (
+            "주석 검사 제외 '**' 를 새로 더했다",
+            "[trust] baseline 경로를 바꿨다",
+            "[metrics.ts_any] 절을 지워 지표를 껐다",
+            "기준 ref 기준선에 있는 지표 ts_any 가 지금 꺼져 있다",
+        ):
+            assert needle in out, out
+
+    def test_baseline_dropped_in_merge_compares_parent_version(self, tmp_path, capsys):
+        root = merged_repo(tmp_path / "merged", True, BASELINE_PATH)
+        write(root, BASELINE_PATH, baseline_with(ts_any=EXPECTED["ts_any"] + 1))
+        assert run_metrics(root, "--check", "--base", "HEAD") == 1
+        out = capsys.readouterr().out
+        assert "작업 트리 파일과 비교한다" not in out
+        assert "지워진 기준선(" in out
+        assert f"PR 의 기준선 값 ts_any={EXPECTED['ts_any'] + 1} 가 기준 ref 값 {EXPECTED['ts_any']} 보다 크다" in out
+
+    def test_ty_baseline_dropped_in_merge_compares_parent_version(self, tmp_path, capsys):
+        root = merged_repo(tmp_path / "merged", True, TY_BASELINE_PATH)
+        entry = {"rule": "x", "startColumn": 1, "endColumn": 2, "lineCount": 1}
+        write(root, TY_BASELINE_PATH, json.dumps({"version": 0, "files": {name: [entry] for name in ("a", "b", "c")}}))
+        assert run_metrics(root, "--check", "--base", "HEAD") == 1
+        out = capsys.readouterr().out
+        assert "ty 기준선 항목 수는 비교하지 않는다" not in out
+        assert "지워진 ty 기준선(" in out
+        assert "ty 기준선 진단 항목이 기준 ref 보다 늘었다(2 → 3)" in out
+
+    def test_shallow_clone_cannot_claim_first_introduction(self, metrics_repo, tmp_path, capsys):
+        git(metrics_repo, "rm", "-q", "trust.toml")
+        git(metrics_repo, "commit", "-q", "-m", "config removed")
+        git(tmp_path, "clone", "-q", "--depth", "1", f"file://{metrics_repo}", "shallow")
+        clone = tmp_path / "shallow"
+        write(clone, "trust.toml", METRICS_TOML)
+        out = check_fails_without_label(clone, capsys, "얕은 클론이라 이력에 없다고 확인할 수 없다")
+        assert "첫 도입" not in out
 
 
 class TestSectionKeyBinding:

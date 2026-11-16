@@ -547,10 +547,14 @@ def _compare_baselines(
 
 def _compare_ty(result: CheckResult, root: Path, ty: Ty, ref: str, is_approved: bool) -> None:
     path = ty.baseline
-    base_text, effective = _baseline_source(root, ref, path)
+    source = history_source(root, ref, path)
+    base_text, effective = source.text, source.effective
     work_text = _read_optional(root, path)
     if base_text is None or effective is None:
-        result.notices.append(f"알림: 기준 ref 에 {path} 가 없어 ty 기준선 항목 수는 비교하지 않는다")
+        if source.seen:
+            result.problems.append(Problem(path, 1, _unrestorable_message(ref, path, "ty 기준선", source.reason)))
+        else:
+            result.notices.append(f"알림: 기준 ref 에 {path} 가 없어 ty 기준선 항목 수는 비교하지 않는다")
         return
     if effective != ref:
         result.notices.append(f"알림: 기준 ref({ref})에는 {path} 가 없다 — 지워진 ty 기준선({effective})과 비교한다")
@@ -578,16 +582,52 @@ def _compare_ty(result: CheckResult, root: Path, ty: Ty, ref: str, is_approved: 
     )
 
 
-def _baseline_source(root: Path, ref: str, path: str) -> tuple[str | None, str | None]:
+@dataclass(frozen=True)
+class HistorySource:
+    text: str | None
+    effective: str | None
+    seen: bool
+    reason: str = ""
+
+
+def _parent_specs(commit: str, count: int) -> list[str]:
+    return [f"{commit}^" if index == 1 else f"{commit}^{index}" for index in range(1, count + 1)]
+
+
+def history_source(root: Path, ref: str, path: str) -> HistorySource:
     text = _show_text(root, ref, path)
     if text is not None:
-        return text, ref
-    last = gitfiles.git(root, "log", "-1", "--format=%H", ref, "--", path).decode().strip()
-    if not last:
-        return None, None
-    parent = f"{last}^"
-    previous = _show_text(root, parent, path)
-    return (previous, parent) if previous is not None else (None, None)
+        return HistorySource(text, ref, True)
+    found = (
+        gitfiles.git(root, "log", "-1", "--full-history", "--topo-order", "--format=%H %P", ref, "--", path)
+        .decode()
+        .split()
+    )
+    if found:
+        commit, *parents = found
+        candidates = [commit, *_parent_specs(commit, len(parents))]
+    else:
+        parents = gitfiles.git(root, "rev-list", "--parents", "-n", "1", ref).decode().split()[1:]
+        candidates = _parent_specs(ref, len(parents))
+    for spec in candidates:
+        previous = _show_text(root, spec, path)
+        if previous is not None:
+            return HistorySource(previous, spec, True)
+    if found:
+        return HistorySource(None, None, True, f"{found[0]} 과 그 부모 어디에도 {path} 가 없다")
+    if gitfiles.is_shallow(root):
+        return HistorySource(
+            None, None, True, "얕은 클론이라 이력에 없다고 확인할 수 없다 — 전체 이력을 받는다(fetch-depth: 0)"
+        )
+    return HistorySource(None, None, False)
+
+
+def _unrestorable_message(ref: str, path: str, label: str, reason: str) -> str:
+    return (
+        f"기준 ref({ref}) 이력에 있던 {label}을 되살리지 못해 비교할 수 없다({reason}) — "
+        f"git log --full-history {ref} -- {path} 로 마지막 판을 찾아 되살린다. {label} 비교 실패는 {LABEL} 표지로도 "
+        "통과하지 않는다"
+    )
 
 
 def _gate(result: CheckResult, problems: list[Problem], is_approved: bool) -> None:
@@ -812,20 +852,10 @@ def config_problems(base: Config, work: Config, text: str) -> list[Problem]:
     return found
 
 
-def _config_source(root: Path, ref: str) -> tuple[str | None, str | None, bool]:
-    text = _show_text(root, ref, CONFIG_NAME)
-    if text is not None:
-        return text, ref, True
-    last = gitfiles.git(root, "log", "-1", "--format=%H", ref, "--", CONFIG_NAME).decode().strip()
-    if not last:
-        return None, None, False
-    parent = f"{last}^"
-    return _show_text(root, parent, CONFIG_NAME), parent, True
-
-
 def _compare_config(result: CheckResult, root: Path, config: Config, ref: str) -> tuple[Config | None, list[Problem]]:
-    text, effective, seen = _config_source(root, ref)
-    if not seen:
+    source = history_source(root, ref, CONFIG_NAME)
+    text, effective = source.text, source.effective
+    if not source.seen:
         result.notices.append(
             f"알림: 기준 ref({ref}) 이력에 {CONFIG_NAME} 이 없다 — 첫 도입으로 보고 설정 완화는 비교하지 않는다"
         )
@@ -835,8 +865,9 @@ def _compare_config(result: CheckResult, root: Path, config: Config, ref: str) -
             Problem(
                 CONFIG_NAME,
                 1,
-                f"기준 ref({ref}) 이력에 있던 {CONFIG_NAME} 을 되살리지 못해 설정 완화를 비교할 수 없다 — "
-                f"git log {ref} -- {CONFIG_NAME} 로 마지막 판을 찾아 되살린다. {settings.gate_hint()}",
+                f"기준 ref({ref}) 이력에 있던 {CONFIG_NAME} 을 되살리지 못해 설정 완화를 비교할 수 없다"
+                f"({source.reason}) — git log --full-history {ref} -- {CONFIG_NAME} 로 마지막 판을 찾아 되살린다. "
+                f"{settings.gate_hint()}",
             )
         ]
     label = f"{effective}:{CONFIG_NAME}"
@@ -918,9 +949,13 @@ def check(
     base_config, config_gated = _compare_config(result, root, config, ref)
     _gate(result, config_gated, is_approved)
     base_path = base_config.baseline if base_config is not None else path
-    base_text, effective = _baseline_source(root, ref, base_path)
+    source = history_source(root, ref, base_path)
+    base_text, effective = source.text, source.effective
     if base_text is None or effective is None:
-        result.notices.append(f"알림: 기준 ref 에 {base_path} 이 없어 작업 트리 파일과 비교한다")
+        if source.seen:
+            result.problems.append(Problem(path, 1, _unrestorable_message(ref, base_path, "기준선", source.reason)))
+        else:
+            result.notices.append(f"알림: 기준 ref 에 {base_path} 이 없어 작업 트리 파일과 비교한다")
         if work_text is None:
             result.problems.append(Problem(path, 1, "기준선 파일이 없다 — metrics --update 로 만든다"))
         else:
