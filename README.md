@@ -14,13 +14,13 @@
 태그로 고정한 판을 `uvx` 로 부른다. 저장소 뿌리에서 돌린다.
 
 ```sh
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks comments --base origin/main
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks comments --staged
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks expired
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks repo
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks metrics
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks metrics --check --base origin/main
-uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks metrics --update
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks comments --base origin/main
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks comments --staged
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks expired
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks repo
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks metrics
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks metrics --check --base origin/main
+uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks metrics --update
 ```
 
 필요한 것:
@@ -213,7 +213,7 @@ contract = "frontend/eslint-contract.json"
 ## 판 올리기 절차
 
 1. 이 저장소에서 바꾸고 시험을 통과시킨다(아래 「개발」).
-2. `pyproject.toml` 의 `version` 을 올리고 태그 `v<판>` 을 단다. 이미 단 태그는 옮기지 않는다.
+2. 태그를 붙이기 전에 `pyproject.toml` 의 `version` 을 태그와 같게 올린다(v0.1.1 태그는 이 단계를 빠뜨려 패키지 판이 0.1.0 으로 남았다). 그런 다음 태그 `v<판>` 을 단다. 이미 단 태그는 옮기지 않는다.
 3. 쓰는 저장소는 워크플로·훅의 `@v<판>` 을 새 태그로 바꾸는 PR 을 낸다. 지표 셈법이 바뀌었으면 같은 PR 에서 `metrics --update` 로 기준선을 다시 쓴다(늘면 표지 필요).
 
 ### ty 판을 올리면 기본 수준 표를 다시 만든다

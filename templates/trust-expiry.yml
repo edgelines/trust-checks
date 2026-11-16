@@ -32,7 +32,7 @@ jobs:
       - name: Find expired suppressions
         id: expired
         run: |
-          if uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks expired > "$RUNNER_TEMP/trust-expiry-report.md" 2>&1; then
+          if uvx --from git+https://github.com/edgelines/trust-checks@v0.1.1 trust-checks expired > "$RUNNER_TEMP/trust-expiry-report.md" 2>&1; then
             result=0
           else
             result=$?
