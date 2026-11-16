@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
 
 permissions:
   contents: read
@@ -18,6 +19,7 @@ jobs:
     runs-on: [self-hosted, macOS]
     env:
       BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+      TRUST_BASELINE_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'baseline-approved') && '1' || '0' }}
     steps:
       - uses: actions/checkout@v7
         with:

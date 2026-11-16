@@ -315,12 +315,14 @@ def baseline_with(**changes: int) -> str:
     return metrics.render_baseline({**EXPECTED, **changes})
 
 
-def check_fails_without_label(root: Path, capsys, needle: str, eslint: metrics.EslintRunner = fake_eslint) -> str:
-    assert run_metrics(root, "--check", "--base", "HEAD", eslint=eslint) == 1
+def check_fails_without_label(
+    root: Path, capsys, needle: str, eslint: metrics.EslintRunner = fake_eslint, options: Sequence[str] = ()
+) -> str:
+    assert run_metrics(root, *options, "--check", "--base", "HEAD", eslint=eslint) == 1
     out = capsys.readouterr().out
     assert needle in out, out
     assert "baseline-approved" in out
-    assert run_metrics(root, "--check", "--base", "HEAD", env=APPROVED_ENV, eslint=eslint) == 0
+    assert run_metrics(root, *options, "--check", "--base", "HEAD", env=APPROVED_ENV, eslint=eslint) == 0
     capsys.readouterr()
     return out
 

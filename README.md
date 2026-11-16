@@ -68,7 +68,7 @@ uvx --from git+https://github.com/edgelines/trust-checks@v0.1.0 trust-checks met
 
 ## trust.toml 참조
 
-모든 경로는 저장소 뿌리 기준 상대 경로다(절대 경로·`..` 는 실패, `[trust] node_modules` 만 절대 경로 허용). 모르는 절·열쇠가 있으면 고칠 방법과 함께 실패한다. 절은 모두 생략할 수 있다(빈 파일이면 기본 기능만 돈다).
+모든 경로는 저장소 뿌리 기준 상대 경로다(절대 경로·`..` 는 실패, `[trust] node_modules` 만 절대 경로 허용. 저장소 안을 가리키는 절대 경로는 뿌리 기준 상대 경로로 바꿔 비교한다). 모르는 절·열쇠가 있으면 고칠 방법과 함께 실패한다. 절은 모두 생략할 수 있다(빈 파일이면 기본 기능만 돈다).
 
 ```toml
 [trust]
@@ -188,7 +188,9 @@ contract = "frontend/eslint-contract.json"
 - 기준선 열쇠 집합 = 켜진 지표 집합. 다르면 실패. 기준 ref 기준선에 있던 지표를 끄거나 열쇠 이름을 바꾸면 표지가 필요하다. 새로 켠 지표는 작업 트리 기준선 값과 비교하고 알림을 낸다
 - 기준선·ty 기준선 파일을 지우면 표지로도 통과하지 않는다. 지워진 뒤 다시 만든 기준선은 마지막으로 있던 기준선과 비교한다
 - 기준 ref 에 기준선이 없으면(도입 첫 PR) 작업 트리 기준선과 비교하고 알림을 낸다
-- `trust.toml` 완화도 막는다(표지 필요): `[comments] exclude` 추가, `[repo]` 목록에서 빼기, `[trust] baseline`·`[trust] node_modules` 경로 변경, 이미 있던 `[metrics.*]` 절의 설정 변경·삭제. 기준선 경로를 바꿔도 기준 ref 설정의 기준선과 비교한다. 설정 파일이 저장소 밖이면(`--config`) 이 비교는 건너뛰고 알림을 낸다
+- `trust.toml` 완화도 막는다(표지 필요): `[comments] exclude` 추가, `[repo]` 목록에서 빼기, `[trust] baseline`·`[trust] node_modules` 경로 변경, 이미 있던 `[metrics.*]` 절의 설정 변경·삭제·열쇠 이름(`key`) 변경. 기준선 경로를 바꿔도 기준 ref 설정의 기준선과 비교한다
+- 비교할 기준 설정은 `--config` 와 따로 **기준 ref 의 `<root>/trust.toml`** 이다. 기준 ref 에 없으면 이력에서 지워지기 직전 판을 쓴다. `--config` 로 저장소 밖이나 다른 경로의 설정을 골라도 이 기준 설정과 비교한다. 이력에 `trust.toml` 이 한 번도 없을 때만 첫 도입으로 보고 알림을 낸다. 이력에 있었는데 되살리거나 읽지 못하면 실패한다(표지 필요)
+- 켜진 선택 절의 원천이 없으면 표지로도 통과하지 않는다: 설정에 적은 파일(`[metrics.ty] pyproject` 등)이 없거나 읽히지 않을 때, 폴더(`roots`·`dir`·`tests`)가 없을 때. 다른 절이 같은 파일을 대신 확인한다고 보지 않는다(`metrics` 도 같은 오류로 실패한다)
 
 ## 워크플로 틀
 
@@ -222,10 +224,10 @@ contract = "frontend/eslint-contract.json"
 ty --version
 ty explain rule > "$TMPDIR/ty-rules.txt"
 .venv/bin/python -c 'import sys; from trust_checks import settings; sys.stdout.write(settings.render_ty_defaults(sys.argv[1], open(sys.argv[2], encoding="utf-8").read()))' <판> "$TMPDIR/ty-rules.txt" > src/trust_checks/ty_rule_defaults.json
-.venv/bin/python -m pytest -q -k ty_defaults
+.venv/bin/python -m pytest -q -k TyDefaults
 ```
 
-시험 `test_defaults_table_matches_real_ty` 는 표의 판과 같은 ty 가 있으면 실제 `ty explain rule` 과 표가 같은지 대조한다.
+`-k TyDefaults` 는 `TestRereviewTyDefaults` 의 시험을 고른다. 그중 `test_defaults_table_matches_real_ty` 는 표의 판과 같은 ty 가 있으면 실제 `ty explain rule` 과 표가 같은지 대조한다.
 
 ## 개발
 

@@ -92,7 +92,7 @@ def resolve_config(value: str | None, root: Path, cwd: Path) -> Config:
     except ValueError:
         relative = None
     label = relative if relative is not None else (value or str(path))
-    return load(path, label, relative)
+    return load(path, label, relative, root)
 
 
 def _metrics(

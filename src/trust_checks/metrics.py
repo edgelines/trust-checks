@@ -15,6 +15,7 @@ from trust_checks import gitfiles, settings
 from trust_checks.checks import LABEL, Problem
 from trust_checks.config import (
     COMMENT_KEYS,
+    CONFIG_NAME,
     BannedApi,
     Config,
     ConfigError,
@@ -356,11 +357,50 @@ def _computers(root: Path, config: Config, files: list[str], knip: KnipRunner) -
     return found
 
 
+def _missing_sources(root: Path, config: Config) -> dict[str, list[Problem]]:
+    found: dict[str, list[Problem]] = {}
+    for name, section in config.sections.items():
+        problems: list[Problem] = []
+        for field_name, kind, _ in config_module.METRIC_SECTIONS[name][2]:
+            if kind not in ("dir", "dirs"):
+                continue
+            value = getattr(section, field_name)
+            for directory in (value,) if kind == "dir" else value:
+                if not (root / directory).is_dir():
+                    problems.append(
+                        Problem(
+                            config.label,
+                            settings.line_of(config.text, f"[metrics.{name}]"),
+                            f"[metrics.{name}] 의 {field_name} '{directory}' 폴더가 없다 — 경로를 고치거나 폴더를 되살린다. "
+                            "없는 폴더를 0 으로 세지 않는다",
+                        )
+                    )
+        if isinstance(section, Ty):
+            try:
+                _toml(_read(root, section.pyproject), section.pyproject)
+            except MetricError as error:
+                problems.append(
+                    Problem(
+                        error.path,
+                        error.line,
+                        f"[metrics.ty] 의 pyproject 를 읽지 못했다({error.message}) — 파일을 되살리거나 고친다. "
+                        "ty 설정 완화를 확인할 수 없고 다른 지표가 대신 확인하지 않는다",
+                    )
+                )
+        if problems:
+            found[section.key] = problems
+    return found
+
+
 def collect(root: Path, config: Config, knip: KnipRunner = run_knip) -> tuple[dict[str, int | None], list[Problem]]:
     files = repo_files(root)
     values: dict[str, int | None] = dict.fromkeys(config.metric_keys())
     problems: list[Problem] = []
+    missing = _missing_sources(root, config)
     for key, compute in _computers(root, config, files, knip):
+        if key in missing:
+            problems.extend(missing[key])
+            continue
         try:
             values[key] = compute()
         except MetricError as error:
@@ -761,24 +801,61 @@ def config_problems(base: Config, work: Config, text: str) -> list[Problem]:
         before = base.tables.get(name)
         if before is not None and before != table:
             add(f"[metrics.{name}]", f"[metrics.{name}] 설정이 기준 ref 와 다르다 — 되돌린다.")
+    for name, section in work.sections.items():
+        previous = base.sections.get(name)
+        if previous is not None and previous.key != section.key:
+            add(
+                f"[metrics.{name}]",
+                f"[metrics.{name}] 의 열쇠 이름(key)을 '{previous.key}' 에서 '{section.key}' 로 바꿨다 — 되돌린다. "
+                "열쇠를 바꾸면 다른 지표의 기준선과 비교된다.",
+            )
     return found
 
 
+def _config_source(root: Path, ref: str) -> tuple[str | None, str | None, bool]:
+    text = _show_text(root, ref, CONFIG_NAME)
+    if text is not None:
+        return text, ref, True
+    last = gitfiles.git(root, "log", "-1", "--format=%H", ref, "--", CONFIG_NAME).decode().strip()
+    if not last:
+        return None, None, False
+    parent = f"{last}^"
+    return _show_text(root, parent, CONFIG_NAME), parent, True
+
+
 def _compare_config(result: CheckResult, root: Path, config: Config, ref: str) -> tuple[Config | None, list[Problem]]:
-    if config.relative is None:
-        result.notices.append(f"알림: {config.label} 이 저장소 밖에 있어 기준 ref 설정과 비교하지 않는다")
+    text, effective, seen = _config_source(root, ref)
+    if not seen:
+        result.notices.append(
+            f"알림: 기준 ref({ref}) 이력에 {CONFIG_NAME} 이 없다 — 첫 도입으로 보고 설정 완화는 비교하지 않는다"
+        )
         return None, []
-    base_text = _show_text(root, ref, config.relative)
-    work_text = _read_optional(root, config.relative)
-    if base_text is None or work_text is None:
-        result.notices.append(f"알림: 기준 ref 에 {config.label} 이 없어 설정 완화는 비교하지 않는다")
-        return None, []
+    if text is None or effective is None:
+        return None, [
+            Problem(
+                CONFIG_NAME,
+                1,
+                f"기준 ref({ref}) 이력에 있던 {CONFIG_NAME} 을 되살리지 못해 설정 완화를 비교할 수 없다 — "
+                f"git log {ref} -- {CONFIG_NAME} 로 마지막 판을 찾아 되살린다. {settings.gate_hint()}",
+            )
+        ]
+    label = f"{effective}:{CONFIG_NAME}"
+    if effective != ref:
+        result.notices.append(f"알림: 기준 ref({ref})에는 {CONFIG_NAME} 이 없다 — 지워진 설정({effective})과 비교한다")
+    if config.relative != CONFIG_NAME:
+        result.notices.append(f"알림: 고른 설정 {config.label} 을 기준 설정 {label} 과 비교한다")
     try:
-        base = config_module.parse(base_text, f"{ref}:{config.relative}", config.relative)
+        base = config_module.parse(text, label, CONFIG_NAME, root)
     except ConfigError as error:
-        result.notices.append(f"알림: 기준 ref 의 설정을 읽지 못해 설정 완화는 비교하지 않는다({error})")
-        return None, []
-    return base, config_problems(base, config, work_text)
+        return None, [
+            Problem(
+                CONFIG_NAME,
+                1,
+                f"기준 설정을 읽지 못해 설정 완화를 비교할 수 없다({error}) — 기준 설정을 이 판의 trust-checks 로 "
+                f"읽을 수 있는지 확인한다. {settings.gate_hint()}",
+            )
+        ]
+    return base, config_problems(base, config, config.text)
 
 
 def _deleted_message(ref: str, effective: str, path: str, label: str) -> str:

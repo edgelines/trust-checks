@@ -128,6 +128,7 @@ class Config:
     tool_settings_dirs: tuple[str, ...] = ()
     sections: dict[str, Section] = field(default_factory=dict)
     tables: dict[str, dict] = field(default_factory=dict)
+    text: str = field(default="", repr=False, compare=False)
 
     def get[S](self, kind: type[S]) -> S | None:
         for value in self.sections.values():
@@ -156,6 +157,17 @@ class Config:
 def norm_dir(value: str) -> str:
     text = value.strip().rstrip("/").removeprefix("./")
     return "" if text in ("", ".") else PurePosixPath(text).as_posix()
+
+
+def inside_root(value: str, root: Path | None) -> str:
+    if root is None or not PurePosixPath(value).is_absolute():
+        return value
+    for candidate, top in ((Path(value), root), (Path(value).resolve(), root.resolve())):
+        try:
+            return norm_dir(candidate.relative_to(top).as_posix())
+        except ValueError:
+            continue
+    return value
 
 
 def under(path: str, directory: str) -> bool:
@@ -242,7 +254,7 @@ def _section(reader: _Reader, name: str, table: dict) -> Section:
     return kind(**values)
 
 
-def parse(text: str, label: str, relative: str | None = None) -> Config:
+def parse(text: str, label: str, relative: str | None = None, root: Path | None = None) -> Config:
     reader = _Reader(label)
     try:
         data = tomllib.loads(text)
@@ -270,7 +282,7 @@ def parse(text: str, label: str, relative: str | None = None) -> Config:
         raw[name] = {key: value for key, value in table.items() if key != "key"}
     node_modules = reader.string(trust, "node_modules", "[trust]", None)
     if isinstance(node_modules, str):
-        node_modules = norm_dir(reader.path(node_modules, "node_modules", "[trust]", absolute=True))
+        node_modules = inside_root(norm_dir(reader.path(node_modules, "node_modules", "[trust]", absolute=True)), root)
     baseline = reader.path(str(reader.string(trust, "baseline", "[trust]", DEFAULT_BASELINE)), "baseline", "[trust]")
     directories = reader.strings(repo, "tool_settings_dirs", "[repo]", ())
     return Config(
@@ -283,10 +295,11 @@ def parse(text: str, label: str, relative: str | None = None) -> Config:
         tool_settings_dirs=tuple(norm_dir(reader.path(item, "tool_settings_dirs", "[repo]")) for item in directories),
         sections=sections,
         tables=raw,
+        text=text,
     )
 
 
-def load(path: Path, label: str, relative: str | None = None) -> Config:
+def load(path: Path, label: str, relative: str | None = None, root: Path | None = None) -> Config:
     if not path.is_file():
         raise ConfigError(
             f"{label} 가 없다 — 저장소 뿌리에 {CONFIG_NAME} 을 두거나 --config 로 경로를 준다(모양은 README 의 trust.toml 절)"
@@ -295,4 +308,4 @@ def load(path: Path, label: str, relative: str | None = None) -> Config:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         raise ConfigError(f"{label} 를 UTF-8 로 읽지 못했다 — UTF-8 로 저장한다") from None
-    return parse(text, label, relative)
+    return parse(text, label, relative, root)

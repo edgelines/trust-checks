@@ -21,6 +21,7 @@ from support import (
     fake_eslint,
     fake_knip,
     git,
+    init_repo,
     replace_in,
     require_tool,
     run,
@@ -346,7 +347,7 @@ class TestConfigLoosening:
         assert "[repo] tool_settings_dirs 에서 'app' 를 뺐다" in out
 
     def test_changing_section_needs_label(self, metrics_repo, capsys):
-        write_toml(metrics_repo, METRICS_TOML.replace('roots = ["web/src"]', 'roots = ["web/src/none"]'))
+        write_toml(metrics_repo, METRICS_TOML.replace('roots = ["web/src"]', 'roots = ["web"]'))
         check_fails_without_label(metrics_repo, capsys, "[metrics.ts_any] 설정이 기준 ref 와 다르다")
 
     def test_widening_allow_list_needs_label(self, metrics_repo, capsys):
@@ -380,7 +381,7 @@ class TestConfigLoosening:
         assert run_metrics(metrics_repo, "--check", "--base", "HEAD") == 0
         capsys.readouterr()
 
-    def test_config_outside_root_only_notifies(self, metrics_repo, tmp_path, capsys):
+    def test_config_outside_root_is_compared_with_base_config(self, metrics_repo, tmp_path, capsys):
         write(tmp_path, "outside/trust.toml", METRICS_TOML)
         args = [
             "--root",
@@ -393,7 +394,193 @@ class TestConfigLoosening:
             "HEAD",
         ]
         assert cli.run(args, env=TODAY_ENV, knip=fake_knip, eslint=fake_eslint) == 0
-        assert "저장소 밖에 있어 기준 ref 설정과 비교하지 않는다" in capsys.readouterr().out
+        assert "을 기준 설정 HEAD:trust.toml 과 비교한다" in capsys.readouterr().out
+
+
+WEAK_TOML = '[trust]\nbaseline = "alternate.json"\n[comments]\nexclude = ["**"]\n'
+TY_ONLY_TOML = '[metrics.ty]\npyproject = "pyproject.toml"\nbaseline = "ty-baseline.json"\n'
+
+
+def without_section(text: str, header: str, following: str) -> str:
+    return text[: text.index(header)] + text[text.index(following) :]
+
+
+def ty_only_repo(root: Path) -> Path:
+    init_repo(root)
+    write(root, "trust.toml", TY_ONLY_TOML)
+    write(root, "ty-baseline.json", '{"files": {}}\n')
+    write(root, "pyproject.toml", '[tool.ty.rules]\ndivision-by-zero = "error"\n')
+    write(root, "a.py", "x = 1\n")
+    assert run_metrics(root, "--update") == 0
+    commit_all(root, "ty only")
+    return root
+
+
+class TestBaseConfigBinding:
+    def test_outside_config_loosening_needs_label(self, metrics_repo, tmp_path, capsys):
+        write(tmp_path, "outside.toml", METRICS_TOML + '\n[comments]\nexclude = ["**"]\n')
+        options = ("--config", str(tmp_path / "outside.toml"))
+        out = check_fails_without_label(metrics_repo, capsys, "주석 검사 제외 '**' 를 새로 더했다", options=options)
+        assert f"{tmp_path / 'outside.toml'}:" in out
+
+    @pytest.mark.parametrize("outside", [True, False])
+    def test_weaker_config_elsewhere_fails(self, metrics_repo, tmp_path, capsys, outside):
+        path = tmp_path / "weak.toml" if outside else metrics_repo / "alternate.toml"
+        write(path.parent, path.name, WEAK_TOML)
+        write(metrics_repo, "alternate.json", metrics.render_baseline({key: 0 for key in config.COMMENT_KEYS}))
+        assert run_metrics(metrics_repo, "--config", str(path), "--check", "--base", "HEAD") == 1
+        out = capsys.readouterr().out
+        for needle in (
+            "주석 검사 제외 '**' 를 새로 더했다",
+            "[trust] baseline 경로를 바꿨다",
+            "[metrics.ts_any] 절을 지워 지표를 껐다",
+            "기준 ref 기준선에 있는 지표 ts_any 가 지금 꺼져 있다",
+        ):
+            assert needle in out, out
+
+    def test_other_path_config_dropping_section_needs_label(self, metrics_repo, capsys):
+        text = without_section(METRICS_TOML, "[metrics.knip]", "[metrics.ci_quarantine]").replace(
+            BASELINE_PATH, "alternate.json"
+        )
+        write(metrics_repo, "alternate.toml", text)
+        values = {key: value for key, value in EXPECTED.items() if key != "knip_unused"}
+        write(metrics_repo, "alternate.json", metrics.render_baseline(values))
+        options = ("--config", str(metrics_repo / "alternate.toml"))
+        out = check_fails_without_label(metrics_repo, capsys, "[metrics.knip] 절을 지워 지표를 껐다", options=options)
+        assert "[trust] baseline 경로를 바꿨다" in out
+        assert "알림: 고른 설정 alternate.toml 을 기준 설정 HEAD:trust.toml 과 비교한다" in out
+
+    def test_deleted_then_recreated_config_compares_last_version(self, metrics_repo, capsys):
+        git(metrics_repo, "rm", "-q", "trust.toml")
+        git(metrics_repo, "commit", "-q", "-m", "config removed")
+        write(metrics_repo, "trust.toml", METRICS_TOML + '\n[comments]\nexclude = ["**"]\n')
+        out = check_fails_without_label(metrics_repo, capsys, "주석 검사 제외 '**' 를 새로 더했다")
+        assert "기준 ref(HEAD)에는 trust.toml 이 없다 — 지워진 설정(" in out
+
+    def test_deleted_then_recreated_same_config_passes(self, metrics_repo, capsys):
+        git(metrics_repo, "rm", "-q", "trust.toml")
+        git(metrics_repo, "commit", "-q", "-m", "config removed")
+        write(metrics_repo, "trust.toml", METRICS_TOML)
+        assert run_metrics(metrics_repo, "--check", "--base", "HEAD") == 0
+        assert "지워진 설정(" in capsys.readouterr().out
+
+    def test_config_never_in_history_is_first_introduction(self, tmp_path, capsys):
+        root = init_repo(tmp_path / "first")
+        write(root, "a.py", "x = 1\n")
+        commit_all(root, "no config")
+        write(root, "trust.toml", "")
+        assert run_metrics(root, "--update") == 0
+        assert run_metrics(root, "--check", "--base", "HEAD") == 0
+        assert "이력에 trust.toml 이 없다 — 첫 도입으로 보고" in capsys.readouterr().out
+
+    def test_unreadable_base_config_needs_label(self, metrics_repo, capsys):
+        write(metrics_repo, "trust.toml", METRICS_TOML + "\n[future]\nvalue = 1\n")
+        commit_all(metrics_repo, "config from another version")
+        write(metrics_repo, "trust.toml", METRICS_TOML)
+        check_fails_without_label(metrics_repo, capsys, "기준 설정을 읽지 못해 설정 완화를 비교할 수 없다")
+
+
+class TestSectionKeyBinding:
+    def test_swapping_keys_needs_label(self, metrics_repo, capsys):
+        text = METRICS_TOML.replace("[metrics.ts_any]\n", '[metrics.ts_any]\nkey = "ci_quarantine"\n')
+        write(
+            metrics_repo,
+            "trust.toml",
+            text.replace("[metrics.ci_quarantine]\n", '[metrics.ci_quarantine]\nkey = "ts_any"\n'),
+        )
+        out = check_fails_without_label(
+            metrics_repo, capsys, "[metrics.ts_any] 의 열쇠 이름(key)을 'ts_any' 에서 'ci_quarantine' 로 바꿨다"
+        )
+        assert "[metrics.ci_quarantine] 의 열쇠 이름(key)을 'ci_quarantine' 에서 'ts_any' 로 바꿨다" in out
+
+    def test_swapped_keys_hide_increase_without_label(self, metrics_repo, capsys):
+        write(metrics_repo, "web/src/b.ts", "export const b: any = 1;\n")
+        write(metrics_repo, "app/tests/test_q.py", "def test_a():\n    pass\n")
+        assert run_metrics(metrics_repo, "--check", "--base", "HEAD") == 1
+        capsys.readouterr()
+        text = METRICS_TOML.replace("[metrics.ts_any]\n", '[metrics.ts_any]\nkey = "ci_quarantine"\n')
+        write(
+            metrics_repo,
+            "trust.toml",
+            text.replace("[metrics.ci_quarantine]\n", '[metrics.ci_quarantine]\nkey = "ts_any"\n'),
+        )
+        assert run_metrics(metrics_repo, "--check", "--base", "HEAD") == 1
+        assert "열쇠 이름(key)을" in capsys.readouterr().out
+
+    def test_rotating_keys_needs_label(self, metrics_repo, capsys):
+        text = METRICS_TOML
+        for name, key in (
+            ("ts_any", "ci_quarantine"),
+            ("ci_quarantine", "prose_only_rules"),
+            ("prose_only_rules", "ts_any"),
+        ):
+            text = text.replace(f"[metrics.{name}]\n", f'[metrics.{name}]\nkey = "{key}"\n')
+        write(metrics_repo, "trust.toml", text)
+        out = check_fails_without_label(metrics_repo, capsys, "[metrics.ts_any] 의 열쇠 이름(key)을 'ts_any' 에서")
+        assert "[metrics.ci_quarantine] 의 열쇠 이름(key)을 'ci_quarantine' 에서 'prose_only_rules'" in out
+        assert "[metrics.prose_only_rules] 의 열쇠 이름(key)을 'prose_only_rules' 에서 'ts_any'" in out
+
+    def test_writing_default_key_explicitly_passes(self, metrics_repo, capsys):
+        write(
+            metrics_repo, "trust.toml", METRICS_TOML.replace("[metrics.ts_any]\n", '[metrics.ts_any]\nkey = "ts_any"\n')
+        )
+        assert run_metrics(metrics_repo, "--check", "--base", "HEAD") == 0
+        capsys.readouterr()
+
+
+class TestRequiredSources:
+    def test_deleted_ty_pyproject_fails_even_with_label(self, tmp_path, capsys):
+        root = ty_only_repo(tmp_path / "ty")
+        assert run_metrics(root, "--check", "--base", "HEAD") == 0
+        capsys.readouterr()
+        write(root, "a.py", "x = 1 / 0\n")
+        (root / "pyproject.toml").unlink()
+        needle = "pyproject.toml:1: [metrics.ty] 의 pyproject 를 읽지 못했다(파일이 없다)"
+        for env in (TODAY_ENV, APPROVED_ENV):
+            assert run_metrics(root, "--check", "--base", "HEAD", env=env) == 1
+            assert needle in capsys.readouterr().out
+        assert run_metrics(root) == 1
+        assert needle in capsys.readouterr().out
+
+    def test_unparsable_ty_pyproject_fails(self, tmp_path, capsys):
+        root = ty_only_repo(tmp_path / "ty")
+        write(root, "pyproject.toml", "[tool.ty.rules\n")
+        assert run_metrics(root, "--check", "--base", "HEAD", env=APPROVED_ENV) == 1
+        assert "[metrics.ty] 의 pyproject 를 읽지 못했다(TOML 을 읽지 못했다" in capsys.readouterr().out
+
+    def test_missing_metric_directory_fails_even_with_label(self, metrics_repo, capsys):
+        git(metrics_repo, "rm", "-q", "-r", "app/tests")
+        for env in (TODAY_ENV, APPROVED_ENV):
+            assert run_metrics(metrics_repo, "--check", "--base", "HEAD", env=env) == 1
+            out = capsys.readouterr().out
+            assert "[metrics.ci_quarantine] 의 tests 'app/tests' 폴더가 없다" in out
+            assert "ci_quarantine=읽지 못함" in out
+
+
+class TestAbsoluteNodeModules:
+    def test_inside_root_becomes_relative(self, tmp_path):
+        text = f'[trust]\nnode_modules = "{tmp_path / "deps"}/"\n'
+        assert parse(text, "t", root=tmp_path).node_modules == "deps"
+        assert parse(text, "t", root=tmp_path.resolve()).node_modules == "deps"
+        assert parse(text, "t").node_modules == str(tmp_path / "deps")
+
+    def test_outside_root_stays_absolute(self, tmp_path):
+        text = '[trust]\nnode_modules = "/opt/nm"\n'
+        assert parse(text, "t", root=tmp_path).node_modules == "/opt/nm"
+
+    @pytest.mark.parametrize("absolute", [True, False])
+    def test_tracked_files_under_node_modules_fail(self, repo, capsys, absolute):
+        value = str(repo / "deps") if absolute else "deps"
+        replace_in(repo, "trust.toml", f'node_modules = "{NODE_MODULES}"', f'node_modules = "{value}"')
+        write(repo, "deps/x.py", "value = 1\n")
+        git(repo, "add", "-A")
+        assert run(repo, "repo") == 1
+        assert capsys.readouterr().out.startswith("deps/x.py:1: [trust] node_modules(deps) 아래 파일을 추적한다")
+
+    def test_absolute_and_relative_spelling_compare_equal(self, tmp_path):
+        base = parse('[trust]\nnode_modules = "deps"\n', "base", root=tmp_path)
+        work = parse(f'[trust]\nnode_modules = "{tmp_path / "deps"}"\n', "work", root=tmp_path)
+        assert metrics.config_problems(base, work, work.text) == []
 
 
 class TestEslintContractFile:
