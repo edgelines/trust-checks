@@ -9,6 +9,14 @@
 
 저장소마다 뿌리에 `trust.toml` 하나를 두고, 기본 기능에 더해 필요한 선택 지표를 켠다. 설치 의존성은 없다(Python 표준 라이브러리만). TS/JS 파일 판정과 eslint 검사에만 `bun` 과 저장소의 `node_modules` 를 쓴다.
 
+## 영감 · Inspiration
+
+이 도구는 Lauren Tan(X 계정 [@poteto](https://x.com/poteto))이 X 에 올린 글과 역피라미드 그림에서 영감을 얻었다. 글의 요지는 「software factory」는 마케팅 용어일 뿐이며, 필요한 것은 좋은 소프트웨어 공학과 토큰을 맞는 곳에 쓰는 일이라는 것이다. 결정적(deterministic)인 방법일수록 좋고 토큰도 아낀다는 생각이다. 그림은 위가 가장 넓고 먼저 투자할 곳이다. 층은 위에서부터 codebase(좋은 API 설계·구조·리팩터링) → static analysis(lint·타입·컴파일러·시험·CI) → verification(형식·경험적) → prose(rules·skills·AGENTS.md) → human review 순이다. 이 저장소는 그중 static analysis 층을 저장소마다 같은 방식으로 강제해, 어기면 실패하게 하려는 시도다. 그림과 생각의 출처는 원작자에게 있다. 이 저장소는 원작자와 관계없는 개인 작업이다. 발표 자료를 옮긴 것이 아니라 공개 글에서 영감을 얻었다.
+
+This tool was inspired by a post and inverted-pyramid diagram shared on X by Lauren Tan ([@poteto](https://x.com/poteto)): invest first in the deterministic layers (codebase, static analysis, verification) rather than prose rules (rules, skills, AGENTS.md) and human review. This repository is an attempt to enforce the "static analysis" layer the same way across repositories. Credit for the diagram and the idea belongs to the original author; this project is independent and not affiliated with her.
+
+![Lauren Tan(@poteto)의 역피라미드: 위에서부터 codebase → static analysis → verification → prose → human review](docs/images/poteto-inverted-pyramid.png)
+
 ## 설치·실행
 
 태그로 고정한 판을 `uvx` 로 부른다. 저장소 뿌리에서 돌린다.
