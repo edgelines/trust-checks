@@ -1,0 +1,35 @@
+[[metrics.ruff_rules]]
+key = "broad_except"
+pyproject = "backend/pyproject.toml"
+codes = ["BLE001"]
+roots = ["backend/src", "backend/core", "backend/main.py"]
+exclude = ["backend/src/services/trading/gates"]
+version = "0.15.0"
+fix = "잡을 예외를 좁혀 적는다. 넓게 잡아야 하면 기록한 뒤 다시 던진다"
+
+[[metrics.ruff_rules]]
+key = "print_calls"
+pyproject = "backend/pyproject.toml"
+codes = ["T201"]
+roots = ["backend/src", "backend/core", "backend/main.py"]
+exclude = ["backend/src/services/trading/gates"]
+version = "0.15.0"
+fix = "print 대신 그 모듈의 로거를 쓴다"
+
+[[metrics.ruff_rules]]
+key = "naive_now"
+pyproject = "backend/pyproject.toml"
+codes = ["DTZ005", "DTZ002", "DTZ011"]
+roots = ["backend/src", "backend/core", "backend/main.py"]
+exclude = ["backend/src/services/trading/gates"]
+version = "0.15.0"
+fix = "시각은 시계 모듈의 함수로 얻는다"
+
+[[metrics.ruff_rules]]
+key = "local_imports"
+pyproject = "backend/pyproject.toml"
+codes = ["PLC0415"]
+roots = ["backend/src", "backend/core", "backend/main.py"]
+exclude = ["backend/src/services/trading/gates"]
+version = "0.15.0"
+fix = "import 는 파일 맨 위에 둔다. 고리 때문이면 함께 쓰는 정의를 아래 모듈로 내린다"

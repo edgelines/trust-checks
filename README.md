@@ -87,7 +87,8 @@ node_modules = "frontend/node_modules"
 exclude = []
 
 [repo]
-forbid_names = []
+forbid_names = ["CLAUDE.md", ".env", ".env.*", "*.pem"]
+allow_names = [".env.example"]
 tool_settings_dirs = []
 
 [metrics.ts_any]
@@ -117,6 +118,15 @@ pyproject = "backend/pyproject.toml"
 code = "TID251"
 allow = ["core/database.py", "tests/**"]
 
+[[metrics.ruff_rules]]
+key = "print_calls"
+pyproject = "backend/pyproject.toml"
+codes = ["T201"]
+roots = ["backend/src", "backend/core", "backend/main.py"]
+exclude = ["backend/src/services/trading/gates"]
+version = "0.15.0"
+fix = "print 대신 모듈의 로거를 쓴다."
+
 [metrics.eslint]
 dir = "frontend"
 exceptions = "frontend/eslint-exceptions.json"
@@ -136,7 +146,8 @@ contract = "frontend/eslint-contract.json"
 
 ### `[repo]`
 
-- `forbid_names`: 추적하면 안 되는 파일 이름(예 `"CLAUDE.md"`)
+- `forbid_names`: 추적하면 안 되는 파일 이름이나 glob(예 `"CLAUDE.md"`, `"*.pem"`, `".env.*"`). 폴더 위치와 관계없이 마지막 이름을 대소문자까지 비교한다. 출력에는 해당 파일의 경로가 나온다
+- `allow_names`: `forbid_names` 에 걸려도 허용할 정확한 파일 이름(예 `".env.example"`). 생략하면 비어 있다
 - `tool_settings_dirs`: 이 폴더 아래(`"."` 은 뿌리)에서 `ruff.toml`·`.ruff.toml`·`ty.toml`·`.importlinter`·`setup.cfg`·`tox.ini`·`.flake8` 를 금지하고, `<폴더>/pyproject.toml` 이 아닌 `pyproject.toml` 에 `[tool.ruff]`·`[tool.ty]`·`[tool.importlinter]` 가 있으면 실패한다. 폴더가 겹치면 가장 깊은 폴더가 맡는다
 - 항상 켜진 것: 이름에 `.disabled` 가 든 추적 파일 금지, `.ignore`·`.rgignore` 추적 금지, 무시 목록(`.gitignore` 등)에 걸린 대상 확장자 추적 파일 금지, `[trust] node_modules` 아래 파일 추적 금지
 
@@ -155,7 +166,10 @@ contract = "frontend/eslint-contract.json"
 | `ty` | `ty_baseline_entries` | `baseline`(ty 기준선 JSON)의 진단 항목 수 | ty 기준선 삭제·항목 증가, `[tool.ty]` 의 `src.exclude` 추가·`src.include`·`baseline` 변경, 규칙 유효 수준 낮춤(전역·overrides, 기본 수준 표 기준) |
 | `import_linter` | `import_linter_exceptions` | 이름이 `contract` 인 계약의 `ignore_imports` 수 | `[tool.importlinter]` 설정 변경, 계약 삭제·변경, 모든 계약의 새 `ignore_imports` 쌍(개수가 같아도 바꿔 끼우면 실패) |
 | `banned_api` | `banned_api_exceptions` | ruff `per-file-ignores`(`extend-` 포함) 중 `code` 를 덮는 항목 수(`allow` 항목 제외) | `code` 가 ruff 우선순위상 꺼짐, 예외 글롭·없는 파일, 새 예외 열쇠, `banned-api` 이름 삭제, `extend` 변경, `exclude`·`extend-exclude` 추가 |
+| `ruff_rules` | `key` 필수 | `roots` 에 드는 `.py`·`.pyi` 의 `codes` 위반 수(`exclude` 제외) | 기존 항목의 설정 변경·삭제·`key` 변경에는 `baseline-approved` 표지가 필요하다 |
 | `eslint` | `eslint_exceptions` | `exceptions` JSON(`{"<규칙>": ["src/…"]}`)의 배열 길이 합 | 새 (규칙, 경로) 쌍, 계약 파일 변경, 대상 파일마다 규칙이 `error` 인지·기준 파일과 옵션이 같은지, 검사용 원문이 기대만큼 막히는지 |
+
+`[[metrics.ruff_rules]]` 는 서로 다른 `key` 로 여러 항목을 쓸 수 있다. `roots` 와 `exclude` 는 저장소 뿌리 기준 파일·폴더 경로다. `exclude` 를 생략하면 `roots` 에 드는 추적 파일과 무시되지 않은 새 파일을 모두 센다. `uvx ruff@<version>` 은 `--select`, `--isolated`, `--ignore-noqa` 로 실행한다. `pyproject` 에서 `[tool.ruff] target-version` 을 넘기고, 생략된 경우 해당 Ruff 판의 기본값을 쓴다. 위반 수가 늘면 변경된 줄의 진단 위치와 설정에 적은 `fix` 문장을 출력한다. 변경된 줄에 진단이 없으면 현재 위반 위치를 보여 준다.
 
 `code` 의 접두어는 앞 영문자 묶음부터 센다(`TID251` → `ALL`·`TID`·`TID2`·`TID25`·`TID251`). Pylint 계열(`PLC`·`PLE`·`PLR`·`PLW`)은 상위 `PL` 도 센다. 같은 수준이면 ignore 가, 다른 수준이면 더 구체적인 쪽이 이긴다(ruff 와 같다).
 
@@ -196,7 +210,7 @@ contract = "frontend/eslint-contract.json"
 - 기준선 열쇠 집합 = 켜진 지표 집합. 다르면 실패. 기준 ref 기준선에 있던 지표를 끄거나 열쇠 이름을 바꾸면 표지가 필요하다. 새로 켠 지표는 작업 트리 기준선 값과 비교하고 알림을 낸다
 - 기준선·ty 기준선 파일을 지우면 표지로도 통과하지 않는다. 지워진 뒤 다시 만든 기준선은 마지막으로 있던 기준선과 비교한다. 지워진 판은 `git log --full-history` 로 찾으므로 병합에서 지운 경우(한쪽 부모에만 있던 경우 포함)도 그 부모의 판을 되살린다. 이력에 있었는데 되살리지 못하면 표지로도 통과하지 않는다
 - 기준 ref 에 기준선이 없으면(도입 첫 PR) 작업 트리 기준선과 비교하고 알림을 낸다
-- `trust.toml` 완화도 막는다(표지 필요): `[comments] exclude` 추가, `[repo]` 목록에서 빼기, `[trust] baseline`·`[trust] node_modules` 경로 변경, 이미 있던 `[metrics.*]` 절의 설정 변경·삭제·열쇠 이름(`key`) 변경. 기준선 경로를 바꿔도 기준 ref 설정의 기준선과 비교한다
+- `trust.toml` 완화도 막는다(표지 필요). `[comments] exclude` 추가, `[repo] forbid_names`·`tool_settings_dirs` 삭제 및 `allow_names` 추가, `[trust] baseline`·`node_modules` 경로 변경, 이미 있던 지표 설정 변경·삭제·열쇠 이름(`key`) 변경이 해당한다. 기준선 경로를 바꿔도 기준 ref 설정의 기준선과 비교한다
 - 비교할 기준 설정은 `--config` 와 따로 **기준 ref 의 `<root>/trust.toml`** 이다. 기준 ref 에 없으면 이력(`--full-history`, 병합 부모 포함)에서 지워지기 직전 판을 쓴다. `--config` 로 저장소 밖이나 다른 경로의 설정을 골라도 이 기준 설정과 비교한다. 이력에 `trust.toml` 이 한 번도 없을 때만 첫 도입으로 보고 알림을 낸다. 이력에 있었는데 되살리거나 읽지 못하면 실패한다(표지 필요). 얕은 클론이라 이력에 없다고 확인할 수 없을 때도 실패한다(CI 는 `fetch-depth: 0`)
 - 켜진 선택 절의 원천이 없으면 표지로도 통과하지 않는다: 설정에 적은 파일(`[metrics.ty] pyproject` 등)이 없거나 읽히지 않을 때, 폴더(`roots`·`dir`·`tests`)가 없을 때. 다른 절이 같은 파일을 대신 확인한다고 보지 않는다(`metrics` 도 같은 오류로 실패한다)
 
@@ -253,3 +267,4 @@ uv sync --locked
 - 시험은 임시 git 저장소와 `trust.toml` 으로 돈다. TS·eslint 시험은 이 저장소의 `node_modules` 를 쓴다
 - 이 저장소의 코드·설정·시험·워크플로도 주석 금지를 지킨다(뿌리의 `trust.toml` 로 자기 자신을 검사한다)
 - `examples/aox3.trust.toml` 은 aox3 저장소용 설정 예다. `TRUST_CHECKS_AOX3=<aox3 체크아웃>` 을 주면 그 저장소로 예시 설정을 대조하는 시험이 돈다
+- `examples/aox3.ruff-rules.trust.toml` 의 네 항목은 AoX 의 Ruff 위반 수를 세는 설정 예다. `trust.toml` 에 추가하고 `metrics --update` 로 기준선을 만든다

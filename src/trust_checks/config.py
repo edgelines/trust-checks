@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -36,6 +36,17 @@ class BannedApi:
     pyproject: str
     code: str
     allow: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RuffRules:
+    key: str
+    pyproject: str
+    codes: tuple[str, ...]
+    roots: tuple[str, ...]
+    exclude: tuple[str, ...]
+    version: str
+    fix: str
 
 
 @dataclass(frozen=True)
@@ -79,10 +90,10 @@ class ProseOnly:
     heading: str
 
 
-Section = ImportLinter | BannedApi | Eslint | TsAny | Ty | Knip | Quarantine | ProseOnly
+Section = ImportLinter | BannedApi | RuffRules | Eslint | TsAny | Ty | Knip | Quarantine | ProseOnly
 
 _FieldSpec = tuple[str, str, object]
-METRIC_SECTIONS: dict[str, tuple[str, type, tuple[_FieldSpec, ...]]] = {
+METRIC_SECTIONS: dict[str, tuple[object, type, tuple[_FieldSpec, ...]]] = {
     "import_linter": (
         "import_linter_exceptions",
         ImportLinter,
@@ -92,6 +103,18 @@ METRIC_SECTIONS: dict[str, tuple[str, type, tuple[_FieldSpec, ...]]] = {
         "banned_api_exceptions",
         BannedApi,
         (("pyproject", "path", _REQUIRED), ("code", "str", _REQUIRED), ("allow", "list", ())),
+    ),
+    "ruff_rules": (
+        _REQUIRED,
+        RuffRules,
+        (
+            ("pyproject", "path", _REQUIRED),
+            ("codes", "list", _REQUIRED),
+            ("roots", "paths", _REQUIRED),
+            ("exclude", "paths", ()),
+            ("version", "str", _REQUIRED),
+            ("fix", "str", _REQUIRED),
+        ),
     ),
     "eslint": (
         "eslint_exceptions",
@@ -108,11 +131,22 @@ METRIC_SECTIONS: dict[str, tuple[str, type, tuple[_FieldSpec, ...]]] = {
         (("doc", "path", _REQUIRED), ("heading", "str", "규칙과 강제 수단")),
     ),
 }
-_KEY_ORDER = ("import_linter", "banned_api", "eslint", "ts_any", "", "ty", "knip", "ci_quarantine", "prose_only_rules")
+_KEY_ORDER = (
+    "import_linter",
+    "banned_api",
+    "ruff_rules",
+    "eslint",
+    "ts_any",
+    "",
+    "ty",
+    "knip",
+    "ci_quarantine",
+    "prose_only_rules",
+)
 _TOP = {
     "trust": ("baseline", "node_modules"),
     "comments": ("exclude",),
-    "repo": ("forbid_names", "tool_settings_dirs"),
+    "repo": ("forbid_names", "allow_names", "tool_settings_dirs"),
     "metrics": tuple(METRIC_SECTIONS),
 }
 
@@ -125,6 +159,7 @@ class Config:
     node_modules: str | None = None
     exclude: tuple[str, ...] = ()
     forbid_names: tuple[str, ...] = ()
+    allow_names: tuple[str, ...] = ()
     tool_settings_dirs: tuple[str, ...] = ()
     sections: dict[str, Section] = field(default_factory=dict)
     tables: dict[str, dict] = field(default_factory=dict)
@@ -141,6 +176,8 @@ class Config:
         for name in _KEY_ORDER:
             if not name:
                 keys.extend(COMMENT_KEYS)
+            elif name == "ruff_rules":
+                keys.extend(section.key for section in self.sections.values() if isinstance(section, RuffRules))
             elif name in self.sections:
                 keys.append(self.sections[name].key)
         return tuple(keys)
@@ -228,9 +265,8 @@ class _Reader:
         return tuple(item.strip() for item in value)
 
 
-def _section(reader: _Reader, name: str, table: dict) -> Section:
+def _section(reader: _Reader, name: str, table: dict, where: str) -> Section:
     default_key, kind, fields = METRIC_SECTIONS[name]
-    where = f"[metrics.{name}]"
     reader.only(table, (*(spec[0] for spec in fields), "key"), where)
     key = reader.string(table, "key", where, default_key)
     if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
@@ -239,7 +275,7 @@ def _section(reader: _Reader, name: str, table: dict) -> Section:
         )
     values: dict[str, object] = {"key": key}
     for field_name, field_kind, default in fields:
-        if field_kind == "dirs":
+        if field_kind in ("dirs", "paths"):
             items = reader.strings(table, field_name, where, default)
             values[field_name] = tuple(norm_dir(reader.path(item, field_name, where)) for item in items)
         elif field_kind == "list":
@@ -251,7 +287,34 @@ def _section(reader: _Reader, name: str, table: dict) -> Section:
             elif field_kind == "path":
                 value = reader.path(value, field_name, where).removeprefix("./")
             values[field_name] = value
-    return kind(**values)
+    section = kind(**values)
+    if isinstance(section, RuffRules):
+        if any(not re.fullmatch(r"[A-Z]+[0-9]+", code) for code in section.codes):
+            raise reader.fail(f"{where} 의 codes 에 전체 Ruff 규칙 코드를 적는다(예: T201)")
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", section.version):
+            raise reader.fail(f"{where} 의 version 에 정확한 Ruff 판을 적는다(예: 0.15.0)")
+        if len(section.fix.splitlines()) != 1:
+            raise reader.fail(f"{where} 의 fix 에 고칠 방법을 한 줄로 적는다")
+    return section
+
+
+def _metric_entries(reader: _Reader, metrics: dict, name: str) -> Iterator[tuple[str, dict]]:
+    if name != "ruff_rules":
+        yield f"[metrics.{name}]", reader.table(metrics, name, "metrics.")
+        return
+    entries = metrics[name]
+    if not isinstance(entries, list):
+        raise reader.fail("metrics.ruff_rules 는 표 목록이어야 한다 — [[metrics.ruff_rules]] 절로 쓴다")
+    for index, entry in enumerate(entries, start=1):
+        where = f"[[metrics.ruff_rules]] {index}번째 항목"
+        if not isinstance(entry, dict):
+            raise reader.fail(f"{where} 이 표가 아니다")
+        yield where, entry
+
+
+def metric_section_label(name: str) -> str:
+    kind, _, key = name.partition(".")
+    return f'[[metrics.{kind}]] (key = "{key}")' if key else f"[metrics.{kind}]"
 
 
 def parse(text: str, label: str, relative: str | None = None, root: Path | None = None) -> Config:
@@ -271,15 +334,16 @@ def parse(text: str, label: str, relative: str | None = None, root: Path | None 
     for name in METRIC_SECTIONS:
         if name not in metrics:
             continue
-        table = reader.table(metrics, name, "metrics.")
-        section = _section(reader, name, table)
-        if section.key in owners:
-            raise reader.fail(
-                f"[metrics.{name}] 의 열쇠 이름 '{section.key}' 가 {owners[section.key]} 과 겹친다 — key 를 다르게 쓴다"
-            )
-        owners[section.key] = f"[metrics.{name}]"
-        sections[name] = section
-        raw[name] = {key: value for key, value in table.items() if key != "key"}
+        for where, table in _metric_entries(reader, metrics, name):
+            section = _section(reader, name, table, where)
+            if section.key in owners:
+                raise reader.fail(
+                    f"{where} 의 열쇠 이름 '{section.key}' 가 {owners[section.key]} 과 겹친다 — key 를 다르게 쓴다"
+                )
+            owners[section.key] = where
+            identifier = f"{name}.{section.key}" if isinstance(section, RuffRules) else name
+            sections[identifier] = section
+            raw[identifier] = {key: value for key, value in table.items() if key != "key"}
     node_modules = reader.string(trust, "node_modules", "[trust]", None)
     if isinstance(node_modules, str):
         node_modules = inside_root(norm_dir(reader.path(node_modules, "node_modules", "[trust]", absolute=True)), root)
@@ -292,6 +356,7 @@ def parse(text: str, label: str, relative: str | None = None, root: Path | None 
         node_modules=node_modules if isinstance(node_modules, str) else None,
         exclude=reader.strings(comments, "exclude", "[comments]", ()),
         forbid_names=reader.strings(repo, "forbid_names", "[repo]", ()),
+        allow_names=reader.strings(repo, "allow_names", "[repo]", ()),
         tool_settings_dirs=tuple(norm_dir(reader.path(item, "tool_settings_dirs", "[repo]")) for item in directories),
         sections=sections,
         tables=raw,

@@ -6,6 +6,7 @@ import tomllib
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 from trust_checks import gitfiles
@@ -351,11 +352,13 @@ def _tool_settings_problem(root: Path, path: str, directories: Sequence[str]) ->
 
 def check_repo(root: Path, config: Config) -> list[Problem]:
     problems: list[Problem] = []
-    forbidden = set(config.forbid_names)
+    allowed = set(config.allow_names)
     directories = sorted(config.tool_settings_dirs, key=lambda item: (-len(PurePosixPath(item or ".").parts), item))
     for path in gitfiles.tracked_files(root):
         pure = PurePosixPath(path)
-        if pure.name in forbidden:
+        if pure.name not in allowed and any(
+            pure.name == pattern or fnmatchcase(pure.name, pattern) for pattern in config.forbid_names
+        ):
             problems.append(
                 Problem(
                     path,
