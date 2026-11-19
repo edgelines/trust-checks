@@ -28,7 +28,8 @@ exclude = [
 ]
 
 [repo]
-forbid_names = ["CLAUDE.md"]
+forbid_names = ["CLAUDE.md", ".env", ".env.*", "*.pem", "*.key", "*.crt", "*.p12", "*.pfx"]
+allow_names = [".env.example"]
 tool_settings_dirs = ["backend"]
 
 [metrics.import_linter]

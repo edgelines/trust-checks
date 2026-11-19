@@ -11,7 +11,7 @@ from trust_checks import checks, metrics
 from trust_checks.checks import CheckError, Problem
 from trust_checks.config import CONFIG_NAME, Config, ConfigError, load
 from trust_checks.gitfiles import GitError, git
-from trust_checks.metrics import EslintRunner, KnipRunner
+from trust_checks.metrics import EslintRunner, KnipRunner, RuffDiagnostic, RuffRunner
 from trust_checks.scan import ToolMissing
 
 ERROR_PREFIX = "trust_checks: 오류: "
@@ -102,11 +102,13 @@ def _metrics(
     env: Mapping[str, str],
     knip: KnipRunner,
     eslint: EslintRunner,
+    ruff: RuffRunner,
 ) -> Output:
     keys = config.metric_keys()
-    current, problems = metrics.collect(root, config, knip)
+    ruff_details: dict[str, list[RuffDiagnostic]] = {}
+    current, problems = metrics.collect(root, config, knip, ruff, ruff_details if args.check else None)
     if args.check:
-        result = metrics.check(root, config, args.base, current, checks.approved(env), eslint)
+        result = metrics.check(root, config, args.base, current, checks.approved(env), eslint, ruff_details)
         lines = metrics.metric_lines(keys, current, result.compared)
         notices = result.notices
         problems = [*problems, *result.problems]
@@ -123,12 +125,17 @@ def _metrics(
 
 
 def _dispatch(
-    args: argparse.Namespace, cwd: Path, env: Mapping[str, str], knip: KnipRunner, eslint: EslintRunner
+    args: argparse.Namespace,
+    cwd: Path,
+    env: Mapping[str, str],
+    knip: KnipRunner,
+    eslint: EslintRunner,
+    ruff: RuffRunner,
 ) -> Output:
     root = resolve_root(getattr(args, "root", None), cwd)
     config = resolve_config(getattr(args, "config", None), root, cwd)
     if args.command == "metrics":
-        return _metrics(args, root, config, env, knip, eslint)
+        return _metrics(args, root, config, env, knip, eslint, ruff)
     now = checks.today(env)
     if args.command == "comments":
         is_approved = checks.approved(env)
@@ -156,13 +163,14 @@ def run(
     cwd: Path | None = None,
     knip: KnipRunner = metrics.run_knip,
     eslint: EslintRunner = metrics.run_eslint,
+    ruff: RuffRunner = metrics.run_ruff,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "metrics" and args.check != bool(args.base):
         parser.error("metrics --check 와 --base REF 는 함께 쓴다")
     try:
-        code, lines = _dispatch(args, cwd or Path.cwd(), env, knip, eslint)
+        code, lines = _dispatch(args, cwd or Path.cwd(), env, knip, eslint, ruff)
     except CheckError as error:
         code, lines = 1, [f"{ERROR_PREFIX}{error.message}", *error.details]
     except KNOWN_ERRORS as error:

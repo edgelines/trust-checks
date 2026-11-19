@@ -10,6 +10,7 @@ from trust_checks import cli, config, settings
 from trust_checks.scan import is_excluded
 
 EXAMPLE = REPO / "examples/aox3.trust.toml"
+RUFF_EXAMPLE = REPO / "examples/aox3.ruff-rules.trust.toml"
 CONTRACT = REPO / "examples/aox3.eslint-contract.json"
 AOX3_KEYS = {
     "services_to_routes_imports",
@@ -36,6 +37,13 @@ def example():
 def test_example_keys_match_aox3_baseline_keys():
     assert set(example().metric_keys()) == AOX3_KEYS
     assert len(example().metric_keys()) == 13
+
+
+def test_ruff_example_extends_aox3_metric_keys():
+    text = EXAMPLE.read_text(encoding="utf-8") + "\n" + RUFF_EXAMPLE.read_text(encoding="utf-8")
+    configured = config.parse(text, "aox3 예시")
+    assert set(configured.metric_keys()) == AOX3_KEYS | {"broad_except", "print_calls", "naive_now", "local_imports"}
+    assert configured.allow_names == (".env.example",)
 
 
 def test_example_contract_parses():

@@ -8,6 +8,8 @@ import subprocess
 import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from difflib import SequenceMatcher
+from itertools import batched
 from pathlib import Path, PurePosixPath
 
 from trust_checks import config as config_module
@@ -24,9 +26,11 @@ from trust_checks.config import (
     Knip,
     ProseOnly,
     Quarantine,
+    RuffRules,
     TsAny,
     Ty,
     join,
+    metric_section_label,
     under,
 )
 from trust_checks.scan import DISALLOWED, EXTERNAL, ISSUE, LICENSE, FileScan, is_target, scan_texts
@@ -57,6 +61,14 @@ class MetricError(Exception):
 
 KnipRunner = Callable[[Path, str], str]
 EslintRunner = Callable[[Path, str, list[str], list[str], list[dict[str, str]]], dict]
+RuffRunner = Callable[[Path, list[str]], subprocess.CompletedProcess[str]]
+
+
+@dataclass(frozen=True)
+class RuffDiagnostic:
+    path: str
+    line: int
+    code: str
 
 
 @dataclass
@@ -254,6 +266,10 @@ def run_knip(root: Path, directory: str) -> str:
     return result.stdout
 
 
+def run_ruff(root: Path, command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, cwd=root, capture_output=True, text=True, check=False)
+
+
 def repo_files(root: Path) -> list[str]:
     paths = set(gitfiles.tracked_files(root)) | set(gitfiles.untracked_files(root))
     return sorted(path for path in paths if (root / path).is_file() and not (root / path).is_symlink())
@@ -272,6 +288,69 @@ def _source_problem(key: str, error: MetricError) -> Problem:
     return Problem(
         error.path, error.line, f"{key} 를 셀 수 없다({error.message}) — 원천 파일을 고친다. 0 으로 두지 않는다"
     )
+
+
+def _ruff_target(text: str, path: str) -> str | None:
+    tool = _toml(text, path).get("tool", {})
+    ruff = tool.get("ruff", {}) if isinstance(tool, dict) else None
+    if not isinstance(ruff, dict):
+        raise MetricError(path, 1, "[tool.ruff] 가 표가 아니다")
+    target = ruff.get("target-version")
+    if target is not None and (not isinstance(target, str) or not re.fullmatch(r"py3[0-9]+", target)):
+        raise MetricError(path, 1, "[tool.ruff] target-version 에 py313 같은 값을 적는다")
+    return target
+
+
+def _ruff_diagnostics(root: Path, section: RuffRules, files: list[str], runner: RuffRunner) -> list[RuffDiagnostic]:
+    path = section.pyproject
+    target = _ruff_target(_read(root, path), path)
+    for source in section.roots:
+        if not (root / source).exists():
+            raise MetricError(source, 1, "roots 에 적은 파일 또는 폴더가 없다")
+    command = [
+        "uvx",
+        f"ruff@{section.version}",
+        "check",
+        "--isolated",
+        "--ignore-noqa",
+        "--no-cache",
+        "--output-format",
+        "json",
+        "--select",
+        ",".join(section.codes),
+    ]
+    if target is not None:
+        command.extend(["--target-version", target])
+    sources = (
+        file
+        for file in files
+        if PurePosixPath(file).suffix in (".py", ".pyi")
+        and any(under(file, source) for source in section.roots)
+        and not any(under(file, source) for source in section.exclude)
+    )
+    found: list[RuffDiagnostic] = []
+    for batch in batched(sources, 128):
+        try:
+            result = runner(root, [*command, "--", *batch])
+        except OSError as error:
+            raise MetricError(path, 1, f"uvx ruff@{section.version} 를 실행하지 못했다: {error}") from error
+        if result.returncode not in (0, 1) or not result.stdout.strip():
+            raise MetricError(path, 1, f"ruff 실행 실패(종료 {result.returncode}): {result.stderr.strip()[-300:]}")
+        data = _json(result.stdout, path)
+        if not isinstance(data, list) or bool(data) != (result.returncode == 1):
+            raise MetricError(path, 1, "ruff JSON 진단 목록과 종료 코드가 맞지 않는다")
+        for item in data:
+            location = item.get("location") if isinstance(item, dict) else None
+            if not isinstance(item, dict) or not isinstance(location, dict):
+                raise MetricError(path, 1, "ruff JSON 진단에 위치가 없다")
+            filename, row, code = item.get("filename"), location.get("row"), item.get("code")
+            if not isinstance(filename, str) or type(row) is not int or row < 1 or not isinstance(code, str):
+                raise MetricError(path, 1, "ruff JSON 진단의 파일·줄·코드를 읽을 수 없다")
+            relative = (root / filename).relative_to(root).as_posix()
+            if code in ("invalid-syntax", "E902"):
+                raise MetricError(relative, row, f"ruff 가 파일을 검사하지 못했다({code})")
+            found.append(RuffDiagnostic(relative, row, code))
+    return found
 
 
 def _comment_metrics(root: Path, config: Config, files: list[str]) -> tuple[dict[str, int] | None, list[Problem]]:
@@ -360,6 +439,8 @@ def _computers(root: Path, config: Config, files: list[str], knip: KnipRunner) -
 def _missing_sources(root: Path, config: Config) -> dict[str, list[Problem]]:
     found: dict[str, list[Problem]] = {}
     for name, section in config.sections.items():
+        if isinstance(section, RuffRules):
+            continue
         problems: list[Problem] = []
         for field_name, kind, _ in config_module.METRIC_SECTIONS[name][2]:
             if kind not in ("dir", "dirs"):
@@ -392,7 +473,13 @@ def _missing_sources(root: Path, config: Config) -> dict[str, list[Problem]]:
     return found
 
 
-def collect(root: Path, config: Config, knip: KnipRunner = run_knip) -> tuple[dict[str, int | None], list[Problem]]:
+def collect(
+    root: Path,
+    config: Config,
+    knip: KnipRunner = run_knip,
+    ruff: RuffRunner = run_ruff,
+    ruff_details: dict[str, list[RuffDiagnostic]] | None = None,
+) -> tuple[dict[str, int | None], list[Problem]]:
     files = repo_files(root)
     values: dict[str, int | None] = dict.fromkeys(config.metric_keys())
     problems: list[Problem] = []
@@ -405,6 +492,16 @@ def collect(root: Path, config: Config, knip: KnipRunner = run_knip) -> tuple[di
             values[key] = compute()
         except MetricError as error:
             problems.append(_source_problem(key, error))
+    for section in config.sections.values():
+        if isinstance(section, RuffRules):
+            try:
+                diagnostics = _ruff_diagnostics(root, section, files, ruff)
+            except MetricError as error:
+                problems.append(_source_problem(section.key, error))
+            else:
+                values[section.key] = len(diagnostics)
+                if ruff_details is not None:
+                    ruff_details[section.key] = diagnostics
     counts, comment_problems = _comment_metrics(root, config, files)
     problems.extend(comment_problems)
     if counts is not None:
@@ -493,6 +590,36 @@ def _approval_hint() -> str:
     return f"꼭 늘려야 하면 PR 에 사람이 {LABEL} 표지를 단다(에이전트는 달지 않는다)"
 
 
+def _ruff_increase_hint(root: Path, ref: str, section: RuffRules, diagnostics: Sequence[RuffDiagnostic]) -> str:
+    by_file: dict[str, list[RuffDiagnostic]] = {}
+    for diagnostic in diagnostics:
+        by_file.setdefault(diagnostic.path, []).append(diagnostic)
+    changed: list[RuffDiagnostic] = []
+    for path, findings in by_file.items():
+        before = gitfiles.show(root, f"{ref}:{path}")
+        if before is None:
+            changed.extend(findings)
+        else:
+            try:
+                after = (root / path).read_bytes()
+            except OSError:
+                continue
+            if before == after:
+                continue
+            edits = SequenceMatcher(None, before.splitlines(), after.splitlines()).get_opcodes()
+            changed.extend(
+                finding
+                for finding in findings
+                if any(tag != "equal" and start < finding.line <= end for tag, _, _, start, end in edits)
+            )
+        if len(changed) >= 10:
+            break
+    candidates = changed or diagnostics
+    locations = ", ".join(f"{item.path}:{item.line} ({item.code})" for item in candidates[:10])
+    location_label = "변경된 줄의 위반" if changed else "현재 위반 위치"
+    return f"{section.fix} ({location_label}: {locations})" if locations else section.fix
+
+
 def _compare_current(
     result: CheckResult,
     keys: Sequence[str],
@@ -501,6 +628,7 @@ def _compare_current(
     path: str,
     text: str,
     is_approved: bool,
+    increase_hint: Callable[[str], str],
 ) -> None:
     for key in keys:
         now = current.get(key)
@@ -508,10 +636,10 @@ def _compare_current(
         if now is None or before is None:
             continue
         if now > before:
-            message = f"{key} 가 기준선 {before} 보다 늘었다(현재 {now}) — 늘린 원인을 되돌린다. {_approval_hint()}"
             if is_approved:
                 result.notices.append(f"알림: {key} 증가({before} → {now})는 {LABEL} 표지로 통과한다")
             else:
+                message = f"{key} 가 기준선 {before} 보다 늘었다(현재 {now}) — {increase_hint(key)} {_approval_hint()}"
                 result.problems.append(Problem(path, _key_line(text, key), message))
         elif now < before:
             result.notices.append(
@@ -827,6 +955,9 @@ def config_problems(base: Config, work: Config, text: str) -> list[Problem]:
     for name in base.forbid_names:
         if name not in work.forbid_names:
             add("forbid_names", f"[repo] forbid_names 에서 '{name}' 를 뺐다 — 되돌린다.")
+    for name in work.allow_names:
+        if name not in base.allow_names:
+            add("allow_names", f"[repo] allow_names 에 '{name}' 를 더했다 — 되돌린다.")
     for directory in base.tool_settings_dirs:
         if directory not in work.tool_settings_dirs:
             add("tool_settings_dirs", f"[repo] tool_settings_dirs 에서 '{directory or '.'}' 를 뺐다 — 되돌린다.")
@@ -836,11 +967,13 @@ def config_problems(base: Config, work: Config, text: str) -> list[Problem]:
         add("node_modules", "[trust] node_modules 경로를 바꿨다 — TS/JS 판정기가 바뀐다. 되돌린다.")
     for name in base.tables:
         if name not in work.tables:
-            add("[metrics", f"[metrics.{name}] 절을 지워 지표를 껐다 — 되돌린다.")
+            add("[metrics", f"{metric_section_label(name)} 절을 지워 지표를 껐다 — 되돌린다.")
     for name, table in work.tables.items():
         before = base.tables.get(name)
         if before is not None and before != table:
-            add(f"[metrics.{name}]", f"[metrics.{name}] 설정이 기준 ref 와 다르다 — 되돌린다.")
+            header, _, key = name.partition(".")
+            needle = f'"{key}"' if key else f"[metrics.{header}]"
+            add(needle, f"{metric_section_label(name)} 설정이 기준 ref 와 다르다 — 되돌린다.")
     for name, section in work.sections.items():
         previous = base.sections.get(name)
         if previous is not None and previous.key != section.key:
@@ -935,6 +1068,7 @@ def check(
     current: Mapping[str, int | None],
     is_approved: bool,
     eslint: EslintRunner = run_eslint,
+    ruff_details: Mapping[str, list[RuffDiagnostic]] | None = None,
 ) -> CheckResult:
     _verify_ref(root, ref)
     result = CheckResult()
@@ -951,6 +1085,14 @@ def check(
     base_path = base_config.baseline if base_config is not None else path
     source = history_source(root, ref, base_path)
     base_text, effective = source.text, source.effective
+
+    def increase_hint(key: str) -> str:
+        section = config.sections.get(f"ruff_rules.{key}")
+        if isinstance(section, RuffRules):
+            diagnostics = ruff_details.get(key, ()) if ruff_details is not None else ()
+            return _ruff_increase_hint(root, effective or ref, section, diagnostics)
+        return "늘린 원인을 되돌린다."
+
     if base_text is None or effective is None:
         if source.seen:
             result.problems.append(Problem(path, 1, _unrestorable_message(ref, base_path, "기준선", source.reason)))
@@ -960,7 +1102,7 @@ def check(
             result.problems.append(Problem(path, 1, "기준선 파일이 없다 — metrics --update 로 만든다"))
         else:
             result.compared = worktree
-            _compare_current(result, keys, current, worktree, path, work_text, is_approved)
+            _compare_current(result, keys, current, worktree, path, work_text, is_approved, increase_hint)
         if ty is not None:
             _compare_ty(result, root, ty, ref, is_approved)
         _settings(result, root, config, None, is_approved, eslint)
@@ -973,7 +1115,7 @@ def check(
     result.problems.extend(problems)
     reference, gated = _reference_values(result, config, base, present, worktree, base_text)
     result.compared = reference
-    _compare_current(result, keys, current, reference, path, work_text or base_text, is_approved)
+    _compare_current(result, keys, current, reference, path, work_text or base_text, is_approved, increase_hint)
     _compare_baselines(result, keys, worktree, base, path, work_text or base_text, is_approved)
     if ty is not None:
         _compare_ty(result, root, ty, ref, is_approved)
