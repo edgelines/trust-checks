@@ -139,6 +139,26 @@ def test_missing_source_and_ruff_failure_cannot_update_baseline(ruff_repo, capsy
     assert not (ruff_repo / BASELINE_PATH).exists()
 
 
+def test_invalid_syntax_cannot_update_baseline(ruff_repo, capsys):
+    write(ruff_repo, SOURCE, "print(1)\nprint(2)\n")
+    assert run_metrics(ruff_repo, "--update", ruff=fake_ruff) == 0
+    baseline = ruff_repo / BASELINE_PATH
+    before = baseline.read_bytes()
+    capsys.readouterr()
+    write(ruff_repo, SOURCE, "value = )\n")
+
+    def syntax_error(root, command):
+        if SOURCE not in command:
+            return fake_ruff(root, command)
+        diagnostics = [{"filename": str(root / SOURCE), "location": {"row": 1}, "code": "invalid-syntax"}]
+        return subprocess.CompletedProcess(command, 1, json.dumps(diagnostics), "")
+
+    assert run_metrics(ruff_repo, "--update", ruff=syntax_error) == 1
+    out = capsys.readouterr().out
+    assert f"{SOURCE}:1: print_calls 를 셀 수 없다(ruff 가 파일을 검사하지 못했다(invalid-syntax))" in out
+    assert baseline.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     ("text", "message"),
     [

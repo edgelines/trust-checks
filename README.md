@@ -166,7 +166,7 @@ contract = "frontend/eslint-contract.json"
 | `ty` | `ty_baseline_entries` | `baseline`(ty 기준선 JSON)의 진단 항목 수 | ty 기준선 삭제·항목 증가, `[tool.ty]` 의 `src.exclude` 추가·`src.include`·`baseline` 변경, 규칙 유효 수준 낮춤(전역·overrides, 기본 수준 표 기준) |
 | `import_linter` | `import_linter_exceptions` | 이름이 `contract` 인 계약의 `ignore_imports` 수 | `[tool.importlinter]` 설정 변경, 계약 삭제·변경, 모든 계약의 새 `ignore_imports` 쌍(개수가 같아도 바꿔 끼우면 실패) |
 | `banned_api` | `banned_api_exceptions` | ruff `per-file-ignores`(`extend-` 포함) 중 `code` 를 덮는 항목 수(`allow` 항목 제외) | `code` 가 ruff 우선순위상 꺼짐, 예외 글롭·없는 파일, 새 예외 열쇠, `banned-api` 이름 삭제, `extend` 변경, `exclude`·`extend-exclude` 추가 |
-| `ruff_rules` | `key` 필수 | `roots` 에 드는 `.py`·`.pyi` 의 `codes` 위반 수(`exclude` 제외) | |
+| `ruff_rules` | `key` 필수 | `roots` 에 드는 `.py`·`.pyi` 의 `codes` 위반 수(`exclude` 제외) | 기존 항목의 설정 변경·삭제·`key` 변경에는 `baseline-approved` 표지가 필요하다 |
 | `eslint` | `eslint_exceptions` | `exceptions` JSON(`{"<규칙>": ["src/…"]}`)의 배열 길이 합 | 새 (규칙, 경로) 쌍, 계약 파일 변경, 대상 파일마다 규칙이 `error` 인지·기준 파일과 옵션이 같은지, 검사용 원문이 기대만큼 막히는지 |
 
 `[[metrics.ruff_rules]]` 는 서로 다른 `key` 로 여러 항목을 쓸 수 있다. `roots` 와 `exclude` 는 저장소 뿌리 기준 파일·폴더 경로다. `exclude` 를 생략하면 `roots` 에 드는 추적 파일과 무시되지 않은 새 파일을 모두 센다. `uvx ruff@<version>` 은 `--select`, `--isolated`, `--ignore-noqa` 로 실행한다. `pyproject` 에서 `[tool.ruff] target-version` 을 넘기고, 생략된 경우 해당 Ruff 판의 기본값을 쓴다. 위반 수가 늘면 변경된 줄의 진단 위치와 설정에 적은 `fix` 문장을 출력한다. 변경된 줄에 진단이 없으면 현재 위반 위치를 보여 준다.
